@@ -1,4 +1,4 @@
-# Source files belonging to the paper: Analyzing continuous proportions in ecology and evolution: a practical introduction to beta and Dirichlet
+# Source files belonging to the paper: Analyzing continuous proportions in ecology and evolution: a practical introduction to beta and Dirichlet regression.
 **J.C. Douma & J.T. Weedon**
 published in *Methods in Ecology and Evolution*
 
