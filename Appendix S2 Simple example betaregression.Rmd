@@ -1,0 +1,235 @@
+---
+title: "Appendix S2 Simple example of beta regression"
+author: "James Weedon & Bob Douma"
+date: "18 February 2019"
+header-includes:
+   - \usepackage{amsmath}
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.align = "center")
+```
+
+### The Beta distribution
+
+The Beta distribution is a continuous two parameter probability distribution for real values on the closed interval $[0,1]$.
+The standard parameterization (i.e. that used by the base distribution functions in `R` - `dbeta`, `pbeta`, `qbeta` and `rbeta`) involves two shape parameters $a$ and $b$ (or alternatively $\alpha$ and $\beta$, or `shape1` and `shape2` in the distribution functions of `R`).
+The alternative parameterization in terms of $\mu$ and $\phi$ is more useful when performing beta regression, and is therefore used as the default in the `betareg` package (see Appendix S2 for detailed explanation on the parameterisation of the beta distribution).
+
+The figure below shows the variety of probability density distributions that can be obtained for different choices of $\mu$ and $\phi$.
+
+
+
+```{r pressure, echo=FALSE, fig.height=4, fig.width=4,fig.align="center"}
+library(RColorBrewer)
+
+cols <- brewer.pal(5, "Set1")
+
+curve(dbeta(x, 0.5, 0.5), ylim = c(0, 4), col = cols[1], lwd = 2, xlab = "Value", ylab = "Probability Density", from = 0, to = 1, las = 1)
+curve(dbeta(x, 1, 1), add = TRUE, col = cols[2], lwd = 2)
+curve(dbeta(x, 2.8, 1.2), add = TRUE, col = cols[4], lwd = 2)
+curve(dbeta(x, 2, 3), add = TRUE, col = cols[5], lwd = 2)
+curve(dbeta(x, 4, 4), add = TRUE, col = cols[3], lwd = 2)
+
+
+legend("top",
+  col = cols, lwd = 2, lty = 1, cex = 0.7, legend = c(
+    expression(paste(mu == 0.5 ~ ~ phi == 1)),
+    expression(paste(mu == 0.5 ~ ~ phi == 2)),
+    expression(paste(mu == 0.5 ~ ~ phi == 8)),
+    expression(paste(mu == 0.7 ~ ~ phi == 4)),
+    expression(paste(mu == 0.4 ~ ~ phi == 5))
+  ),
+  bty = "n"
+)
+```
+
+### Beta regression
+
+The essence of beta regression is to estimate a model that describes how the parameters $\mu$ and $\phi$ vary according to some set of covariates and predictors, and therefore define beta distributions that best correspond with the observed values of the response variable. We illustrate how this works by contrasting familiar least-squares regression with the beta regression procedure.
+
+\newpage
+
+We consider a dataset of proportions $Y$ (so limited to the interval $[0,1]$) measured along with a continuous covariate $X$:
+
+
+```{r, echo=FALSE}
+
+dbeta2 <- function(X, mu, phi, ...) {
+  dbeta(X, shape1 = mu * phi, shape2 = (1 - mu) * phi, ...)
+}
+
+rbeta2 <- function(N, mu, phi, ...) {
+  rbeta(N, shape1 = mu * phi, shape2 = (1 - mu) * phi, ...)
+}
+
+library(pander)
+library(boot)
+# set.seed(127)
+set.seed(127)
+
+
+X <- sort(runif(8, min = 1, max = 10))
+Y <- rbeta2(8, inv.logit(-2 + 0.7 * X), 5)
+```
+
+
+```{r, results='asis'}
+int.table <- cbind(round(X, 1), round(Y, 2))
+pandoc.table(int.table, col.names = c("X", "Y"))
+```
+
+```{r, fig.width = 4, fig.align="center", fig.height=4}
+plot(Y ~ X, ylim = c(0, 1), las = 1)
+```
+
+To model a relationship between these two variables using **ordinary least squares regression** we would estimate the parameters $\beta_0$, $\beta_1$, and $\sigma$ from the following model by minimizing the residual sum of squares:
+
+$$y_i = \beta_0 + \beta_1 x_i + \epsilon_i $$
+
+$$\epsilon \sim \mathcal{N}(0, \sigma)$$
+
+This model emphasizes that there is a deterministic part -  described by the values of $\beta$ and which is essentially a straight line - and a stochastic part which is added as normally distributed "noise", with a mean of $0$ and a spread determined by $\sigma$.
+
+The same model can also be written as:
+
+$$Y \sim \mathcal{N}(\mu, \sigma) $$
+$$ \mu_i = \beta_0 + \beta_1 x_i $$
+
+This form emphasizes that the response is modeled as a random normal variable, with the mean of the distribution depending on the values of the covariates, and the $\beta$ parameters.
+
+The figure below shows the linear regression model fit to this dataset. The blue dots are the observed values, the red line is the linear regression line of the mean $\mu$ and the grey lines represent the estimated distribution of the response variable $Y$ at different values of the predictor $X$.
+We have also plotted solid black lines at $Y=0$ and $Y=1$ to show the boundaries imposed by the data type.
+
+Some important things to note:
+
+* the spread of the estimated distributions are constant across the values of the predictor (a result of fixed $\sigma$
+* the estimated distributions are symmetrical across all values of the predictor (a result of the assumption of normality)
+* the linear model predicts values of the response outside the allowable range of $[0,1]$
+
+The preceding three features lead to a model that does not realistically reflect the observed data and the known constraints on the values it can take.
+
+```{r, fig.width = 10, fig.height=8}
+
+library(plot3D)
+library(boot)
+
+lin.mod <- lm(Y ~ X)
+
+scatter3D(X, Y, rep(0, length(X)), xlim = c(0, 11), ylim = c(-0.3, 1.3), zlim = c(0, 5), theta = 35, phi = 25, colkey = FALSE, resvac = 10, r = 3, xlab = "Predictor", ylab = "Response", zlab = "Probability", ticktype = "detailed", pch = 16, cex = 1.6)
+
+xrange <- seq(0, 11, length.out = 30)
+ypred <- t(coef(lin.mod)) %*% t(cbind(rep(1, 10), xrange))
+lines3D(xrange, ypred, rep(0, length(xrange)), lty = 2, col = "red", add = TRUE)
+
+lines3D(c(0, 11), c(0, 0), rep(0, 2), lwd = 2, col = "black", add = TRUE)
+lines3D(c(0, 11), c(1, 1), rep(0, 2), lwd = 2, col = "black", add = TRUE)
+
+yrange <- seq(-0.3, 1.3, length.out = 50)
+
+for (xx in seq(0, 10, length.out = 7)) {
+  lines3D(rep(xx, length(yrange)), yrange, dnorm(yrange, mean = t(coef(lin.mod)) %*% t(cbind(c(1), c(xx))), sd = sqrt(mean(resid(lin.mod)^2))), add = TRUE, col = "#C0C0C060")
+}
+```
+
+\newpage
+
+The linear regression plotted above assumes that the response variables can be modeled as generated by a Normal distribution. In contrast, the **beta regression** model assumes that the response variable is drawn from a beta distribution. As above, the mean $\mu$ is assumed to be a function of covariates. 
+The parameter $\mu$ is modeled as a linear function of the parameters $\beta$, but this can lead to values of $\mu$ outside the range $[0,1]$. 
+Therefore, an additional step is the introduction of a link-function to convert between the unbounded values possible under a linear model and the $[0,1]$ range for which the beta distribution is defined.
+
+Several link functions are possible (see main text), we designate them here with $g()$, to write out the beta regression model:
+
+$$ Y \sim \mathcal{B}(\mu, \phi) $$
+$$ g(\mu_i) = \beta_0 + \beta_1 x_i $$
+
+In the case of the default logit link function $g(x) = log(\frac{x}{1-x})$, and its corresponding inverse $g^{-1}(x) = \frac{e^x}{1+e^x}$ the model can  therefore be rewritten in terms of $\mu$:
+
+$$ \mu_i = \frac{e^{\beta_0 + \beta_1 x_i}}{1 + e^{\beta_0 + \beta_1 x_i}} $$
+
+This means that, although the relationship amongst predictor variables and the predicted values are modeled as linear on the "link" scale, the use of a link function means that the relationship on the scale of the original observations will be non-linear, in a manner determined by the choice of link function.
+
+The figure below show the same dataset as above, with different models for $\mu$ corresponding to different choices of $\beta_0$ and $\beta_1$. 
+
+
+```{r, fig.height = 4, fig.width = 8}
+par(mfrow = c(1, 2))
+
+plot(Y ~ X, ylim = c(0, 1), pch = 16, col = "blue", las = 1, main = expression(paste("Varying ", beta[0])))
+library(betareg)
+bet.model <- betareg(Y ~ X)
+cfs <- coef(bet.model)[1:2]
+curve(inv.logit(0.4 * cfs[1] + cfs[2] * x), add = TRUE, lty = 2, col = "springgreen4")
+curve(inv.logit(1.6 * cfs[1] + cfs[2] * x), add = TRUE, lty = 2, col = "orangered")
+curve(inv.logit(cfs[1] + cfs[2] * x), add = TRUE, lty = 2, lwd = 2)
+legend("bottomright", c(
+  expression(paste(beta[0], "= -1.69 ", beta[1], "= 0.69")),
+  expression(paste(beta[0], "= -1.05 ", beta[1], "= 0.69")),
+  expression(paste(beta[0], "= -0.42 ", beta[1], "= 0.69"))
+),
+lty = c(2, 2, 2), col = c("orangered", "black", "springgreen4"), cex = 0.8, bty = "n"
+)
+
+plot(Y ~ X, ylim = c(0, 1), pch = 16, col = "blue", las = 1, main = expression(paste("Varying ", beta[1])))
+curve(inv.logit(cfs[1] + 0.4 * cfs[2] * x), add = TRUE, lty = 2, col = "springgreen4")
+curve(inv.logit(cfs[1] + 1.6 * cfs[2] * x), add = TRUE, lty = 2, col = "orangered")
+curve(inv.logit(cfs[1] + cfs[2] * x), add = TRUE, lty = 2, lwd = 2)
+legend("bottomright", c(
+  expression(paste(beta[0], "= -1.05 ", beta[1], "= 0.69")),
+  expression(paste(beta[0], "= -1.05 ", beta[1], "= 0.43")),
+  expression(paste(beta[0], "= -1.05 ", beta[1], "= 0.17"))
+),
+lty = c(2, 2, 2), col = c("orangered", "black", "springgreen4"), cex = 0.8, bty = "n"
+)
+```
+
+The beta regression fitting procedure consists in finding the combination of $\beta$ and $\phi$ parameters that maximize the likelihood of the observed data. The figure below represents the best fit model for this particular dataset. Important to note is that the estimated distributions are always bounded within the interval $[0,1]$, and that the model for $\mu$ is likewise constrained within the same boundaries. These properties mean that the model can be more safely used for prediction, data generation, and extrapolation beyond the observed values of the covariates.
+
+```{r, fig.width = 10, fig.height=7}
+
+
+
+ypred.beta <- predict(bet.model, newdata = data.frame(X = xrange))
+
+
+scatter3D(X, Y, rep(0, length(X)), xlim = c(0, 11), ylim = c(-0.3, 1.3), zlim = c(0, 7), theta = 35, phi = 25, colkey = FALSE, resvac = 10, r = 3, xlab = "Predictor", ylab = "Response", zlab = "Probability", ticktype = "detailed", pch = 16, cex = 1.6)
+lines3D(c(0, 11), c(0, 0), rep(0, 2), lwd = 2, col = "black", add = TRUE)
+lines3D(c(0, 11), c(1, 1), rep(0, 2), lwd = 2, col = "black", add = TRUE)
+lines3D(xrange, ypred.beta, rep(0, length(xrange)), lty = 2, col = "red", add = TRUE)
+
+for (xx in seq(0, 10, length.out = 7)) {
+  lines3D(rep(xx, length(yrange)), yrange, dbeta2(yrange,
+    mu = predict(bet.model, newdata = data.frame(X = xx)),
+    phi = coef(bet.model)[3]
+  ),
+  add = TRUE, col = "#C0C0C060"
+  )
+}
+```
+
+It is important to note that the estimated coefficients of the model relate to the linear predictor on the transformed scale.
+
+```{r, results='asis'}
+pandoc.table(coef(bet.model))
+```
+
+To interpret these parameters on the scale of the original observations, the inverse of the link function needs to be applied. For example, the predicted expected value when $X = 5$ is:
+
+\begin{align*}
+g(E[Y |X = 5]) &= `r round(coef(bet.model)[1],3)` +`r round(coef(bet.model)[2],3)` \times 5 \\
+&= `r round(coef(bet.model)[1] + coef(bet.model)[2]* 5,3)` \\
+E[Y|X=5]  &= \frac{e^{`r round(coef(bet.model)[1] + coef(bet.model)[2]* 5,3)`}}{1 + e^{`r round(coef(bet.model)[1] + coef(bet.model)[2]* 5,3)`}} \\
+&= `r round(exp(coef(bet.model)[1] + coef(bet.model)[2]*5)/(1 + exp(coef(bet.model)[1] + coef(bet.model)[2]* 5)),2)`
+\end{align*}
+
+From this the following useful facts follow:
+
+* $\frac{e^{\beta_0}}{1 + e^{\beta_0}}$ is the predicted value of the response when the predictor $= 0$; 
+* when $\beta_0 = 0$ the corresponding value of the 'intercept' depends on the choice of link function. In the case of the logit link, this implies that the predicted value is $0.5$ when $X = 0$
+* if $\beta_1 = 0$ then there is no change in the predicted value over the whole range of $X$
+* when $\beta_1 > 0$ the predicted values increase with increasing $X$, and when $\beta_1 < 0$ they decrease

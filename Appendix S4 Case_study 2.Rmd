@@ -1,0 +1,680 @@
+---
+title: "Appendix S4 - Case study 2 Applying Dirichlet regression to biomass partitioning"
+author: "Bob Douma & James Weedon"
+date: "18 February 2019"
+output:
+  html_document:
+    css: hideOutput.css
+  pdf_document: default
+  word_document: default
+---
+
+<script src="hideOutput.js"></script>
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This case study is intended to illustrate the use of Dirichlet regression in an ANCOVA-type design; comparing proportions as a function of covariates across factorial combinations of treatments. The data in this case study are taken from Poorter *et al.* (1995) who wanted to experimentally test  whether differences between slow- and a fast-growing plant species persist at low nutrient supply. Replicate indivuals of two plant species, *Deschampsia flexuosa* (slow growing) and *Holcus lanatus* (fast growing) were grown under low and high nitrate supply for a maximum of 49 days. Every 2-3 days, 6-8 plants were harvested for each species and the proportion biomass in roots, stems and leaves was determined. There are numerous approaches to analysing the partitioning of biomass over organs (reviewed in Sack and Poorter 2012, Frontiers in Plant Science), but a very common method is to model organ biomass independent of the size of the plant by expressing these as proportions. 
+
+This case study is an illustration of proportions originating from continuous variables (leaf, stem and root biomass) of which the sum, total biomass, is unbound. Therefore, Dirichlet regression is a natural choice for this type of response. The response variables are the proportions of biomass in leaves, roots and stems and the independent variables were time (days of growth), species identity and nitrate levels (2 discrete treatments).
+ 
+Below, we will demonstrate the use of Dirichlet regression in `R`. We will take the following steps:
+
+1. Analysis of the data through Dirichlet regression
+2. Production of plots of the model predictions alongside the observed data
+3. Visualization of the differences in biomass partioning patterns between species.
+
+# Loading libraries
+To perform dirichlet regression we need the package `DirichletReg`. 
+In addition,we also use `lmtest` to compute the likelihood ratio test  `ggplot2` for plotting, `ggtern` for ternary diagrams, and `reshape` for reshaping data-frames from wide to long format and vice versa.
+
+
+```{r, message=FALSE, eval=T,collapse=T}
+library(DirichletReg)
+library(lmtest)
+library(reshape)
+library(ggplot2)
+library(ggtern)
+```
+
+The next step is to read in the data.
+
+
+```{r, eval=T,collapse=T,message=FALSE  }
+
+spp <- read.csv("data/R6data.csv")
+```
+
+
+# Plotting data
+Before beginning statistical modeling, we make some plots to see possible patterns in the data. We use `ggplot()` to make the plots, and we use `melt` to move from wide format (`LMF`, `SMF` and `RMF`) to long format (`LMF`, `SMF` and `RMF` into a single column). We can make a ternary diagram by using `ggtern()`
+```{r, eval=T,collapse=T,message=FALSE }
+
+# melt data for explorative plotting
+spp.subset <- spp[, c(1:4, 10:12)]
+# melt data.frame with first four columns as id variables
+spp.subset.melt <- melt(spp.subset, id.var = 1:4)
+```
+
+<div class="fold s">
+
+```{r, eval=T,collapse=T,message=FALSE }
+
+# define a common theme to be used to format plots
+
+prop_biomass_theme <- theme(
+  axis.text.x = element_text(angle = 0, hjust = 1, size = 9),
+  axis.text.y = element_text(size = 11),
+  axis.title.y = element_text(size = 11), axis.title.x = element_text(size = 11),
+  panel.background = element_rect(
+    fill = "white",
+    colour = NA
+  ),
+  panel.border = element_rect(
+    fill = NA,
+    colour = "grey50"
+  ),
+  panel.grid.major = element_line(
+    colour = "grey90",
+    size = 0.2
+  ),
+  panel.grid.minor = element_line(
+    colour = "grey98",
+    size = 0.5
+  ),
+  strip.background = element_rect(
+    fill = "grey80",
+    colour = "grey50"
+  ),
+  legend.text = element_text(size = 11),
+  strip.text.x = element_text(size = 9),
+  strip.text.y = element_text(size = 9)
+)
+
+# plot data
+ggplot(spp.subset.melt) +
+  geom_point(aes(x = Day, value, color = Species), data = spp.subset.melt) +
+  facet_grid(Trt ~ variable, scales = "free_y") +
+  prop_biomass_theme +
+  ylab("Proportion biomass") +
+  labs(color = "N supply")
+```  
+</div>
+Alternatively, to show that the biomass fractions sum to one, you could present the data as a stacked line graph:
+
+<div class="fold o">
+```{r ,message=FALSE,  eval=T}
+means.frac <- melt(tapply(spp.subset.melt$value, list("Day" = spp.subset.melt$Day, "Trt" = spp.subset.melt$Trt, "Organ" = spp.subset.melt$variable, "Species" = spp.subset.melt$Species), mean))
+
+spp$`RMF ` <- spp$SMF + spp$RMF
+spp.stack <- melt(spp[, c("Species", "Trt", "Day", "SMF", "RMF ")], id.var = c("Species", "Trt", "Day"))
+ggplot() +
+  geom_area(aes(x = Day, y = value, fill = Organ), position = "stack", data = means.frac) +
+  facet_grid(Trt ~ Species) +
+  geom_point(aes(x = Day, y = value), data = spp.stack) +
+  prop_biomass_theme +
+  ylab("Proportion biomass") +
+  labs(colour = "Organ", fill = "Organ") +
+  xlab("Time (days)")
+```
+</div>
+
+<div class="fold o">
+# Fitting a Dirichlet regression model
+We now proceed by preparing the data to be suitable as input for the Dirichlet regression model. The three dependent variables that will be modelled in the Dirichlet model need to be put in to matrix using the function `DR_data`,  which results in a special `DirichletRegData` matrix. The reference class (i.e. the component that is not explicitly modeled, see main text) in the Dirichlet model can be set through `base`.
+
+```{r ,message=FALSE,  eval=T}
+spp$Y <- DR_data(spp[, c("LMF", "SMF", "RMF")], base = 1)
+```
+
+We can now fit the Dirichlet regression model.The three proportions stored in `spp$Y` will be the dependent variables, and `Species`, `Trt` and `Day` will be the independent variables. We use the alternative parameterisation which means that mean proportion of `SMF` and `RMF` is predicted based on  `Species`, `Trt` and `Day`. The `LMF` is used as the base. In addition, a precision parameter is estimated. The precision is fixed.  
+
+```{r}
+res1 <- DirichReg(Y ~ Species + Trt + Day, data = spp, model = "alternative")
+```
+</div>
+
+You may get warnings by fitting this model. This is because the values of "Day" have maximum values of 49 which leads to problems in the `lgamma` function that is used to calculate the likelihood. For this reason we scale `Day`, with `scale()`.  
+
+<div class="fold o">
+```{r ,message=FALSE,  eval=T}
+spp$Day.s <- scale(spp$Day)
+res1 <- DirichReg(Y ~ Species + Trt + Day.s, data = spp, model = "alternative")
+```
+</div>
+
+# The output of the Dirichlet regression model
+
+The summary output of the regression model can be viewed with the command `summary(res1)`.  The summary consists of four parts. The first part shows the model formula and the standardized residuals of the models for each component. The second, more interesting part, shows how the components depend on the covariates "Species","Treatment", and "Day". The estimated coefficients are reported on a multinomial logit scale, while the precision is reported at a log scale (see part 4 of the summary). In addition, the standard error, the z-value and the p-value corresponding to the fitted coefficients are reported. As the sum of the components is one, only two out of three components are modelled. By default the reference category is omitted. The third part of the summary summarize how the precision of the components depend on the covariates. In this model, the precision is estimated but fixed among the components. The final part report summary statistics such as the log-likelihood, the AIC and BIC and the link functions that were used by the model.
+
+<div class="fold o">
+```{r,eval=T,message=FALSE}
+summary(res1)
+```
+</div>
+
+# Model fit
+
+As noted in the main text, interpreting parameter signs and magnitudes is made difficult by the non-independence of the different component models.
+A good strategy to gain insight into the combined effect of all predictors variables on the leaf mass, stem mass and root mass fractions, as well as assess the model fit, is to plot the predicted values for each component along with the observed data. The fitted values can be retrieved by using the function `fitted()`.  
+
+```{r,eval=T,message=FALSE}
+# make dataframe with the fitted values
+pred <- fitted(res1) # or alternatively pred(res1)
+```
+
+## Calculating fitted values by hand
+
+The dataframe `pred` reports the fitted values for each observation. The fitted values can also be derived from the summary table by combining the coefficients. We first compute the predicted values of class $i$ at the logit scale: $\eta_{i} = \alpha_{i} + \beta_{i} + \gamma_{i}* x$. For example, to obtain the fitted SMF of species *H. lanatus*, high nitrate supply at day 7, first the predicted value at logit scale is computed: $\eta_{SMF,trt=1,species=2,day=7}$, which is backtransformed according to the multinomial logit: $\frac{e^{\eta_{i}}}{\sum_{i=1}^m e^{\eta_{i}}}$. Hence, 
+
+
+```{r,eval=T,message=FALSE}
+# the scaled value for Day 7 is -0.8870158
+eta.SMF <- -0.3089 + 0.3794 + 0.0987 * -0.8870158
+eta.RMF <- -0.8830 + 0.1674 + 0.0788 * -0.8870158
+eta.LMF <- 0 # base
+# shoot mass fraction
+SMF <- exp(eta.SMF) / sum(exp(c(eta.SMF, eta.LMF, eta.RMF)))
+# mass fraction of all organs: leafs, roots and stems
+props <- exp(c(eta.LMF, eta.RMF, eta.SMF)) / sum(exp(c(eta.SMF, eta.LMF, eta.RMF)))
+props
+# compare to predicted values
+pred <- data.frame(spp[, c(2, 3, 4)], pred)
+pred[pred$Trt == "high" & pred$Species == "H. lanatus" & pred$Day == 7, ]
+```
+
+
+<div class="fold s">
+Next, the fitted values are plotted alongside the data. In order to use `ggplot2()`, the predictions for LMF, SMF and RMF are "melted" into a single column, and unique values are taken for each combination of `Day`, `Trt` and `Species`. 
+
+```{r,eval=T,message=FALSE}
+pred.melt <- melt(pred, id.var = 1:3)
+pred.melt.sim <- unique(pred.melt)
+
+# plot model predictions
+ggplot() +
+  geom_point(aes(x = Day, value, color = Trt), data = spp.subset.melt) +
+  geom_line(aes(x = Day, y = value, group = Trt), data = pred.melt.sim) +
+  facet_grid(Species ~ variable, scales = "free_y")
+```
+</div>
+
+
+# Extending the Dirichlet model by modelling the precision
+
+Similar as to beta regression, it is possible to model the precision parameter as a function of observed covariates. The precision part of the model can have a different set of covariates than the mean part. In terms of R syntax, the model for the precision part is specified after the vertical bar `|`. As with `lm` and other model functions in R the main effects of covariates and their interaction(s) can be specified by using the shortcut notation `*` in the model formula.
+
+<div class="fold o">
+```{r,eval=T,message=FALSE}
+res1.prec <- DirichReg(Y ~ Species + Trt + Day.s | Species + Trt + Day.s,
+  data = spp, model = "alternative"
+)
+summary(res1.prec)
+
+# including interaction terms for the mu models
+res1.prec.int <- DirichReg(Y ~ Species * Trt * Day.s | Species + Trt + Day.s,
+  data = spp, model = "alternative"
+)
+summary(res1.prec.int)
+
+# and polynomal terms and total biomass of the harvested plants
+res1 <- DirichReg(Y ~ Species * Trt * Day.s + I(Day.s^2) + I(Day.s^3) + scale(TDM..mg.) |
+  Species * Trt * Day.s + I(Day.s^2) + I(Day.s^3) + scale(TDM..mg.),
+data = spp, model = "alternative"
+)
+summary(res1)
+anova(res1)
+```
+</div>
+
+The complexity in the mean part and the precision part can be further reduced by using the 
+functions that work for linear models, e.g. by using `update`. We start by removing the three way interaction in the precision part. 
+
+<div class="fold o">
+```{r,eval=T,message=FALSE}
+res1.v1 <- update(res1, . ~ . | . - Species:Trt:Day.s)
+summary(res1.v1)
+```
+</div>
+
+The difference in goodness of fit between two models can be analysed using the `anova` command and the `AIC` command. The `anova` command compares nested models by means of the likelihood ratio test. This test applied to models with and without three-way interaction showed that the three way interaction was not significantly improving model fit. The alternative, information theoretic, approach, `AIC()`, computes the AIC of the model based on the likelihood and the number of parameters. Models with a difference of < 2 are usually considered equivalent models in terms of goodness of fit.   
+
+
+```{r,eval=T,message=FALSE}
+anova(res1, res1.v1)
+AIC(res1)
+AIC(res1.v1)
+```
+
+
+We can continue reducing the complexity of the model further. We use sapply to simultaneously calculate the `AIC` for all of the models fitted. 
+
+<div class="fold o">
+```{r,eval=T,message=FALSE}
+res1.v2 <- update(res1.v1, . ~ . | . - Trt:Day.s)
+anova(res1.v1, res1.v2)
+res1.v3 <- update(res1.v2, . ~ . | . - Species:Trt)
+anova(res1, res1.v1, res1.v2, res1.v3)
+res1.v4 <- update(res1.v3, . ~ . | . - I(Day.s^3))
+summary(res1.v4)
+anova(res1, res1.v1, res1.v2, res1.v3, res1.v4)
+res1.v5 <- update(res1.v4, . ~ . | . - I(Day.s^2))
+summary(res1.v5)
+anova(res1, res1.v1, res1.v2, res1.v3, res1.v4, res1.v5)
+```
+</div>
+
+```{r,eval=T,message=FALSE}
+sapply(list(res1, res1.v1, res1.v2, res1.v3, res1.v4, res1.v5), AIC)
+```
+<div class="fold o">
+```{r,eval=T,message=FALSE}
+# removing total biomass from precision part
+res1.v6 <- update(res1.v5, . ~ . | . - scale(TDM..mg.))
+summary(res1.v6)
+anova(res1, res1.v1, res1.v2, res1.v3, res1.v4, res1.v5, res1.v6)
+sapply(list(res1, res1.v1, res1.v2, res1.v3, res1.v4, res1.v5, res1.v6), AIC)
+```
+</div>
+
+<div class="fold o">
+After having defined a minimal model for the precision part, we will reduce the complexity in mean part. We do not start with the final model for the precision, but one that was a little bit more complex to avoid a possible problem that optimising the mean part of the regression does affect the significance of the terms in the precision part.
+```{r,eval=T,message=FALSE}
+res1.v4.mean.v1 <- update(res1.v3, . ~ . - I(Day.s^3) | .)
+anova(res1, res1.v1, res1.v2, res1.v3, res1.v4, res1.v4.mean.v1)
+# since the second order and third order term and total biomass could be removed in the precision part (see above) this will be done as well
+res1.v4.mean.v2 <- update(res1.v4.mean.v1, . ~ . - I(Day.s^3) | . - I(Day.s^2) - I(Day.s^3) - scale(TDM..mg.))
+anova(res1, res1.v1, res1.v2, res1.v3, res1.v4, res1.v4.mean.v1, res1.v4.mean.v2)
+sapply(list(res1, res1.v1, res1.v2, res1.v3, res1.v4, res1.v4.mean.v1, res1.v4.mean.v2), AIC)
+summary(res1.v4.mean.v2)
+
+# removing the second order polynomal term of Day.s
+res1.v4.mean.v3 <- update(res1.v4.mean.v2, . ~ . - I(Day.s^2) | .)
+summary(res1.v4.mean.v3)
+anova(res1, res1.v1, res1.v2, res1.v3, res1.v4, res1.v4.mean.v2, res1.v4.mean.v3)
+# second order termp cannot be removed according to AIC.
+sapply(list(res1, res1.v1, res1.v2, res1.v3, res1.v4, res1.v4.mean.v1, res1.v4.mean.v2, res1.v4.mean.v3), AIC)
+
+# removing the three way interaction between species, nitrate supply and day but leaving the second order term in
+res1.v4.mean.v4 <- update(res1.v4.mean.v2, . ~ . - Species:Day.s:Trt | .)
+summary(res1.v4.mean.v4)
+# removing the interaction term between species, nitrate supply and day leads to an increase in AIC
+anova(res1, res1.v1, res1.v2, res1.v3, res1.v4, res1.v4.mean.v2, res1.v4.mean.v3, res1.v4.mean.v4)
+# removing the two-way interaction between Species and Treatment but leaving the three-way interaction in
+res1.v4.mean.v5 <- update(res1.v4.mean.v2, . ~ . - Species:Trt | .)
+# removing the two-way interaction between
+res1.v4.mean.v6 <- update(res1.v4.mean.v2, . ~ . - Species:Day.s | .)
+
+sapply(list(res1, res1.v1, res1.v2, res1.v3, res1.v4, res1.v4.mean.v1, res1.v4.mean.v2, res1.v4.mean.v3, res1.v4.mean.v4, res1.v4.mean.v5, res1.v4.mean.v6), AIC)
+
+# based on this model selection procedure, res1.v4.mean.v2 and res1.v4.mean.v6 are considered the most parsimonious models
+summary(res1.v4.mean.v2)
+
+# comparing this model with a model that does not include the species effect:
+res.wo.species <- DirichReg(Y ~ Trt + Day.s + I(Day.s^2) + scale(TDM..mg.) + Trt:Day.s | Trt + Day.s, data = spp, model = "alternative")
+summary(res.wo.species)
+```
+</div>
+
+```{r}
+AIC(res.wo.species)
+AIC(res1.v4.mean.v2)
+```
+
+
+Note that in the foregoing analysis we have not explored adding the total mass of the plants as a covariate into the model. This could make sense (i.e. to account for changes in biomass allocation related to overall plant size) and could be included in a more comprehensive analysis.
+
+The confidence intervals of parameters may be obtained using the `confint` function. 
+
+<div class="fold o">
+```{r,eval=T,message=FALSE}
+
+conf.1 <- confint(res1.v4.mean.v2)
+``` 
+</div>
+
+When a parsimonious model is found we plot the  predicted values alongside the data to visually inspect the fit.
+
+<div class="fold s">
+```{r,eval=T,message=FALSE}
+# make dataframe with data that will be used for predictions
+newdata <- data.frame(spp[, c(2:4)])
+
+# As total biomass is part of the model explaining the proportion of biomass invested in leafs, stems and roots, total biomass needs to be predicted for each time point first. We do this through applying a smoother
+spp.predict <- spp
+l1 <- loess(TDM..mg. ~ Day,
+  data = spp.predict[spp.predict$Species == "H. lanatus" & spp.predict$Trt == "low", ]
+)
+l2 <- loess(TDM..mg. ~ Day,
+  data = spp.predict[spp.predict$Species == "H. lanatus" & spp.predict$Trt == "high", ]
+)
+l3 <- loess(TDM..mg. ~ Day,
+  data = spp.predict[spp.predict$Species == "D. flexuosa" & spp.predict$Trt == "low", ]
+)
+l4 <- loess(TDM..mg. ~ Day,
+  data = spp.predict[spp.predict$Species == "D. flexuosa" & spp.predict$Trt == "high", ]
+)
+
+spp.predict[spp.predict$Species == "H. lanatus" & spp.predict$Trt == "low", "biomass"] <- predict(l1)
+spp.predict[spp.predict$Species == "H. lanatus" & spp.predict$Trt == "high", "biomass"] <- predict(l2)
+spp.predict[spp.predict$Species == "D. flexuosa" & spp.predict$Trt == "low", "biomass"] <- predict(l3)
+spp.predict[spp.predict$Species == "D. flexuosa" & spp.predict$Trt == "high", "biomass"] <- predict(l4)
+# predictions for biomass
+
+ggplot() +
+  geom_point(aes(x = Day, TDM..mg., color = Trt), data = spp) +
+  geom_line(aes(x = Day, y = biomass, color = Trt), data = spp.predict) +
+  facet_grid(~Species)
+
+avg.TDM <- aggregate(
+  spp.predict$biomass,
+  list("Species" = spp.predict$Species, "Trt" = spp.predict$Trt, "Day" = spp.predict$Day),
+  mean
+)
+
+newdata <- merge(newdata, avg.TDM, all.x = T, all.y = T)
+colnames(newdata)[4] <- c("TDM..mg.")
+newdata$Day.s <- scale(newdata$Day)
+pred.values <- predict(res1.v4.mean.v2, newdata = newdata)
+colnames(pred.values) <- c("LMF", "SMF", "RMF")
+
+# add predictions to the predictors
+pred <- data.frame(newdata[, c(1, 2, 3)], pred.values)
+
+pred.melt <- melt(pred, id.var = 1:3)
+pred.melt.sim <- unique(pred.melt)
+
+ggplot() +
+  geom_point(aes(x = Day, value, color = Species), data = spp.subset.melt) +
+  geom_line(aes(x = Day, y = value, group = Species), data = pred.melt.sim) +
+  facet_grid(Trt ~ variable, scales = "free_y") +
+  prop_biomass_theme +
+  ylab("Proportion biomass") +
+  labs(color = "N supply")
+```
+</div>
+
+In addition, we can plot how the precision depends on the covariates. This can be done using the command `predict(x,phi=TRUE)`. By using the `$` notation the data.frame with phi values can be extracted. As can be seen from the graph, the estimated precision increases with time.
+
+<div class="fold s">
+```{r,eval=T,message=FALSE}
+# get precision values
+pred.phi <- predict(res1.v4.mean.v2, phi = TRUE)$phi
+pred.phi <- data.frame(spp[, c(2:4)], value = pred.phi)
+pred.phi <- unique(pred.phi)
+pred.phi$variable <- "precision"
+pred.phi <- pred.phi[, c(1, 2, 3, 5, 4)]
+
+# plot precision as a function of time
+ggplot() +
+  geom_line(aes(x = Day, y = value, color = Trt), data = pred.phi) +
+  facet_grid(Species ~ variable, scales = "free_y") +
+  prop_biomass_theme +
+  ylab("Precision") +
+  labs(color = "N supply")
+```
+</div>
+
+Dirichlet regression can be performed with two types of parameterisation (see Appendix S2 for mathematical details). The paramerisation that directly models the $n$ components of the dirichlet distribution is called 'common' in the `DirichletReg` package. The other parameterisation models the means of $n-1$ components, and the precision as a separate parameter.
+Below we fit a model using the common parameterisation.
+The model fit is compared to the alternative parameterisation and we conclude that give similar results, both in terms of predictions and in terms of AIC.
+
+
+<div class="fold o">  
+```{r}
+# model selection with common parameterisation
+# three components are specified and seperated by the vertical bar |
+res1.alt <- DirichReg(Y ~ Species * Trt * Day.s + I(Day.s^2) + I(Day.s^3) + scale(TDM..mg.) |
+  Species * Trt * Day.s + I(Day.s^2) + I(Day.s^3) + scale(TDM..mg.) |
+  Species * Trt * Day.s + I(Day.s^2) + I(Day.s^3) + scale(TDM..mg.), data = spp)
+
+res1.alt.v1 <- DirichReg(Y ~ Species * Trt * Day.s + I(Day.s^2) + scale(TDM..mg.) |
+  Species * Trt * Day.s + I(Day.s^2) + scale(TDM..mg.) |
+  Species * Trt * Day.s + I(Day.s^2) + scale(TDM..mg.), data = spp)
+
+# through 'update' every terms can be removed or added to every component individually
+res1.alt.v2a <- update(res1.alt.v1, ~ . - Species:Trt:Day.s | . | .)
+res1.alt.v2b <- update(res1.alt.v1, ~ . | -Species:Trt:Day.s | .)
+res1.alt.v2c <- update(res1.alt.v1, ~ . | . | . - Species:Trt:Day.s)
+
+res1.alt.v5a <- update(res1.alt.v2a, ~ . - I(Day.s^2) | . | .)
+res1.alt.v5b <- update(res1.alt.v2a, ~ . | . - I(Day.s^2) | .)
+res1.alt.v5c <- update(res1.alt.v2a, ~ . | . | . - I(Day.s^2))
+
+res1.alt.v6a <- update(res1.alt.v5a, ~ . - Trt:Day.s | . | .)
+res1.alt.v6b <- update(res1.alt.v5a, ~ . | . - Trt:Day.s | .)
+res1.alt.v6c <- update(res1.alt.v5a, ~ . | . | . - Trt:Day.s)
+
+res1.alt.v7a <- update(res1.alt.v6a, ~ . - Trt:Species | . | .)
+res1.alt.v7b <- update(res1.alt.v6a, ~ . | . - Trt:Species | .)
+res1.alt.v7c <- update(res1.alt.v6a, ~ . | . | . - Trt:Species)
+res1.alt.v7d <- update(res1.alt.v6a, ~ . - Trt:Species | . - Trt:Species | . - Trt:Species)
+
+# etc....
+
+lrtest(res1.alt, res1.alt.v1)
+
+sapply(list(
+  res1.v4.mean.v2, res1.alt, res1.alt.v1,
+  res1.alt.v2a, res1.alt.v2b, res1.alt.v2c,
+  res1.alt.v5a, res1.alt.v5b, res1.alt.v5c,
+  res1.alt.v6a, res1.alt.v6b, res1.alt.v6c,
+  res1.alt.v7a, res1.alt.v7b, res1.alt.v7c, res1.alt.v7d
+), AIC)
+
+
+AIC(res1.alt)
+AIC(res1)
+
+newdata <- data.frame(spp[, c(2:4)])
+avg.TDM <- aggregate(spp$TDM..mg., list("Species" = spp$Species, "Trt" = spp$Trt, "Day" = spp$Day), mean)
+newdata <- merge(newdata, avg.TDM, all.x = T, all.y = T)
+colnames(newdata)[4] <- c("TDM..mg.")
+newdata$Day.s <- scale(newdata$Day)
+pred.values <- predict(res1.alt.v7a, newdata = newdata) # common parameterisation
+pred.values1 <- predict(res1.v4.mean.v2, newdata = newdata) # alternative parameterisation
+colnames(pred.values) <- c("LMF", "SMF", "RMF")
+colnames(pred.values1) <- c("LMF", "SMF", "RMF")
+# add predictions to the predictors
+pred <- data.frame(newdata[, c(1, 2, 3)], pred.values)
+pred1 <- data.frame(newdata[, c(1, 2, 3)], pred.values1)
+pred.melt <- melt(pred, id.var = 1:3)
+pred.melt1 <- melt(pred1, id.var = 1:3)
+pred.melt.sim <- unique(pred.melt)
+pred.melt.sim1 <- unique(pred.melt1)
+```
+</div>
+
+<div class="fold s">
+```{r}
+
+ggplot() +
+  geom_point(aes(x = Day, value, color = Species), data = spp.subset.melt) +
+  geom_line(aes(x = Day, y = value, group = Species), data = pred.melt.sim) +
+  geom_line(aes(x = Day, y = value, group = Species), data = pred.melt.sim1, color = "red") +
+  facet_grid(Trt ~ variable, scales = "free_y") +
+  prop_biomass_theme +
+  ylab("Proportion biomass") +
+  labs(color = "N supply")
+```
+</div>
+Residuals can be extracted from the model object using `residuals(model.object)`. Three types of residuals can be extracted: the standardized residuals (also called Pearson residuals), the composite residuals (at the link scale), or the raw residuals (at the proportion scale). To assess model fit, Pearson residuals are preferred because of heteroscedasticity of the model. Inspecting the residuals is useful to check whether any patterns remain between the fitted values and the observed values.
+
+<div class="fold s">
+```{r,eval=T,message=FALSE}
+res <- residuals(res1.v4.mean.v2, type = "standardized")
+res.dat <- data.frame(spp[, c(2:4)], value = data.frame(res[, 1], res[, 2], res[, 3]))
+
+names(res.dat) <- c("Species", "Trt", "Day", "LMF", "SMF", "RMF")
+res.dat.melt <- melt(res.dat, id.var = c(1:3))
+
+ggplot() +
+  geom_point(aes(x = Day, y = value, color = Trt), data = res.dat.melt) +
+  facet_grid(Species ~ variable, scales = "free_y") +
+  prop_biomass_theme +
+  ylab("Standardized residuals") +
+  labs(color = "N supply")
+```
+</div>
+
+The most parsimonous model includes the factor `species`.
+For this reason we may conclude that species differ in their biomass partitioning.
+However, this result does not give much insight, because this partitioning may differ over time and may only hold for one of the components (leafs, stems, roots).
+For this reason we will compute how the fraction biomass invested in leafs, stems and roots differs between the two species by taking the ratio of the proportion biomass invested in leaves for the two species.
+This "investment ratio" can be thought of as a measure of effect size.
+If the ratio is close to one, it indicates that the proportion of biomass in leaves is not very different between the two species.
+To gain further insight in the investment ratio, we also compute the prediction interval which represents the 95% confidence interval of the investment ratio of a randomly selected individual from *H. lanatus* and *D. flexuosa*. 
+
+Computing the prediction interval entails a number of steps:
+
+* Extract the model coefficients
+* Extract the variance-covariance matrix of the model coefficients (this represents the uncertainty in the estimated parameters)
+* Draw $N$ combinations of parameter values based on the model coefficients and the variance-covariance matrix
+* Generate predictions of means for RMF and SMF and a precision for each combination of covariates and the simulated parameter values. 
+* Randomly generate values from the Dirichlet distribution with the means and precision calculated in the previous step.
+* Calculate the ratio in predicted LMF for the two species for each combination of covariates values.
+* Calculate the mean and 2.5% and 97.5% quantiles of the predicted values for LMF, SMF and RMF.
+
+```{r, cache=TRUE}
+library(mvtnorm)
+
+means <- unlist(coef(res1.v4.mean.v2))
+vc <- vcov(res1.v4.mean.v2)
+
+# sample from distribution of parameters assuming multivariate normal (accounts for correlation of parameters)
+N <- 1000 # global parameter for number of replications
+
+rnd <- rmvnorm(N, mean = means, sigma = vc)
+
+modobj <- res1.v4.mean.v2 # calls best model fit object `modobj`
+
+# generate linear predictors for each randomization at each of 39 original observations
+dm <- do.call(cbind, modobj$X) # is the design matrix, don't need the last column
+dp <- modobj$Z
+n <- nrow(spp)
+
+
+SMF_lp <- rnd[, grep("SMF", colnames(rnd))] %*% t(dm)[grep("SMF", colnames(rnd)), ] # SMF
+RMF_lp <- rnd[, grep("RMF", colnames(rnd))] %*% t(dm)[grep("RMF", colnames(rnd)), ] # RMF
+LMF_lp <- matrix(0, ncol = n, nrow = N) # LMF
+precision_lp <- rnd[, grep("gamma", colnames(rnd))] %*% t(dp) # precision
+
+## convert linear predictors to mus
+mu_output <- array(NA, dim = c(n, 3, N), dimnames = list(c(1:n), c("simRMF", "simSMF", "simLMF"), c(1:N)))
+
+
+for (i in 1:N) {
+  denom <- (exp(RMF_lp[i, ]) + exp(SMF_lp[i, ]) + exp(rep(0, n)))
+  mu_output[, "simRMF", i] <- exp(RMF_lp[i, ]) / denom
+  mu_output[, "simSMF", i] <- exp(SMF_lp[i, ]) / denom
+  mu_output[, "simLMF", i] <- 1 - (mu_output[, "simRMF", i] + mu_output[, "simSMF", i])
+}
+
+# calculate alphas
+alphas_RMF <- mu_output[, "simRMF", ] * t(exp(precision_lp))
+alphas_SMF <- mu_output[, "simSMF", ] * t(exp(precision_lp))
+alphas_LMF <- mu_output[, "simLMF", ] * t(exp(precision_lp))
+
+# function to combine the computation of the mean and the confidence limits
+mean.quant <- function(x, probs) {
+  a <- mean(x, na.rm = T)
+  b <- t(quantile(x, probs = probs, na.rm = T))
+  d <- c(a, b)
+  names(d) <- c("mean", "lower", "upper")
+  return(d)
+}
+
+# function to compute the difference or ratio between the biomass partitioning for two species
+difference <- function(spp.list) {
+  # browser()
+  sp1 <- which(spp.list$Species == "H. lanatus") # holcus
+  sp2 <- which(spp.list$Species != "H. lanatus") # deschampsia
+  sa1 <- sample(sp1, min(length(sp1), length(sp2)), replace = F)
+  sa2 <- sample(sp2, min(length(sp1), length(sp2)), replace = F)
+  # ratio
+  difs <- (spp.list[sa1, c("simRMF", "simSMF", "simLMF")]) / (spp.list[sa2, c("simRMF", "simSMF", "simLMF")])
+  return(difs)
+}
+
+# simulate from data and calculate ratios
+output <- array(NA, dim = c(n, 3, N), dimnames = list(c(1:n), c("simRMF", "simSMF", "simLMF"), c(1:N)))
+
+output.diff <- array(NA, dim = c(204, 3, N))
+
+for (i in 1:dim(alphas_RMF)[2]) {
+  # prediction
+  test <- cbind(alphas_RMF[, i], alphas_SMF[, i], alphas_LMF[, i])
+  output[, , i] <- rdirichlet(n, test)
+  # calculate ratio of proportional biomass investments
+  spp1 <- data.frame(spp, output[, , i])
+  spp1$Day <- as.factor(spp1$Day)
+  spp.list <- split(spp1, list(spp1$Day, spp1$Trt))
+  out <- do.call(rbind.data.frame, lapply(spp.list, difference))
+  output.diff[, , i] <- as.matrix(out)
+}
+
+
+# generate mean and 95% quantile limits
+RMF_quant <- apply(output[, "simRMF", ], 1, mean.quant, probs = c(0.025, 0.975))
+SMF_quant <- apply(output[, "simSMF", ], 1, mean.quant, probs = c(0.025, 0.975))
+LMF_quant <- apply(output[, "simLMF", ], 1, mean.quant, probs = c(0.025, 0.975))
+
+# add  confidence limits to data.frame
+quant_RMF <- data.frame(spp[, c("Species", "Trt", "Day")], "variable" = "RMF", t(RMF_quant))
+quant_SMF <- data.frame(spp[, c("Species", "Trt", "Day")], "variable" = "SMF", t(SMF_quant))
+quant_LMF <- data.frame(spp[, c("Species", "Trt", "Day")], "variable" = "LMF", t(LMF_quant))
+quant <- rbind.data.frame(quant_RMF, quant_LMF, quant_SMF)
+
+# add prediction interval to observations
+ggplot() +
+  geom_point(aes(x = Day, y = value, color = Species), data = spp.subset.melt) +
+  geom_smooth(aes(x = Day, y = lower, color = Species), data = quant) +
+  geom_smooth(aes(x = Day, y = upper, color = Species), data = quant) +
+  facet_grid(Trt ~ variable) +
+  prop_biomass_theme +
+  ylab("Proportion biomass") +
+  labs(color = "N supply")
+
+
+# prepare data.frame covariates to match with differences, odds ratio or ratio between species
+spp$id <- c(1:nrow(spp)) # add to each row
+
+extract.rows <- function(x) {
+  sp1 <- which(x$Species == "H. lanatus")
+  sp2 <- which(x$Species != "H. lanatus")
+  a <- min(length(sp1), length(sp2))
+  return(x[rep(1, a), ])
+}
+
+spp$Days <- as.factor(spp$Day)
+spp.list <- split(spp, list(spp$Days, spp$Trt))
+out <- do.call(rbind, lapply(spp.list, extract.rows))
+
+# generate 95% quantile limits
+RMF_quant.diff <- apply(output.diff[, 1, ], 1, mean.quant, probs = c(0.025, 0.975))
+SMF_quant.diff <- apply(output.diff[, 2, ], 1, mean.quant, probs = c(0.025, 0.975))
+LMF_quant.diff <- apply(output.diff[, 3, ], 1, mean.quant, probs = c(0.025, 0.975))
+
+# merge into dataframes
+quant_RMF.diff <- data.frame(out[, c("Species", "Trt", "Day")], "variable" = "RMF", t(RMF_quant.diff))
+quant_LMF.diff <- data.frame(out[, c("Species", "Trt", "Day")], "variable" = "LMF", t(LMF_quant.diff))
+quant_SMF.diff <- data.frame(out[, c("Species", "Trt", "Day")], "variable" = "SMF", t(SMF_quant.diff))
+quant.diff <- rbind.data.frame(quant_LMF.diff, quant_RMF.diff, quant_SMF.diff)
+quant.diff$Day <- as.numeric(as.character(quant.diff$Day))
+
+
+ggplot() +
+  geom_hline(yintercept = 1) +
+  geom_smooth(aes(x = Day, y = lower, color = Trt), se = F, size = 0.5, linetype = 2, data = quant.diff) +
+  geom_smooth(aes(x = Day, y = upper, color = Trt), se = F, size = 0.5, linetype = 2, data = quant.diff) +
+  geom_smooth(aes(x = Day, y = mean, colour = Trt), se = F, size = 0.5, data = quant.diff) +
+  facet_grid(. ~ variable) +
+  prop_biomass_theme +
+  ylab("Predicted investment ratio Ratio Holcus / Deschampsia") +
+  labs(color = "Nutrient application")
+```
+
+

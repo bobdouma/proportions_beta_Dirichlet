@@ -1,0 +1,460 @@
+---
+title: "Appendix S5 Case study 3 Forest cover "
+author: "Bob Douma & James Weedon"
+date: "4 February 2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+
+
+
+This appendix has two parts. The first part shows how the data that was used for Case Study 3 was made. The second part shows the relationship quadrat size and the root mean squared error of various beta regression models.
+
+
+## Loading libraries
+```{r, suppressWarnings=T}
+library(rgdal)
+library(raster)
+library(sp)
+library(RODBC)
+library(maptools)
+library(RArcInfo)
+library(betareg)
+library(gtools)
+library(bbmle)
+library(VGAM)
+library(reshape2)
+```
+
+## Defining user defined functions
+```{r, suppressWarnings=T}
+# function to transform fraction with 0 and 1 to <1 and >0
+transform01 <- function(x) {
+  (x * (length(x) - 1) + 0.5) / (length(x))
+}
+# function to backtransform transform01
+backtransform.est <- function(x, n) {
+  y <- (x * n - 0.5) / (n - 1)
+  return(y)
+}
+
+RMSE <- function(x, y) {
+  a <- sqrt(sum((y - x)^2) / length(x))
+  return(a)
+}
+```
+
+
+## Code to generate forests
+
+## function to generate square grid of size gridsize (meters)
+```{r, suppressWarnings=T,eval=T}
+forest <- function(gridsize) {
+  square <- matrix(c(0, 0, 0, gridsize, gridsize, gridsize, gridsize, 0, 0, 0), 
+                   ncol = 2, byrow = 2)
+  square.1 <- Polygon(square, hole = FALSE)
+  square.polygons <- Polygons(list(square.1), ID = c("1"))
+  square <- SpatialPolygons(list(square.polygons))
+  area.square <- data.frame(area = sapply(square@polygons,
+    FUN = function(x) {
+      slot(x, "area")
+    }
+  )) # calculates area of square
+  return(list(square, area.square))
+}
+```
+
+
+
+## generate a number of f trees in an area of the gridsize.
+```{r, suppressWarnings=T,eval=T}
+trees <- function(gridsize, f) {
+  # generate position of trees in square; random assignment of location
+  x <- runif(f, min = 0, max = gridsize)
+  y <- runif(f, min = 0, max = gridsize)
+  coord <- data.frame(x, y)
+  #  points(coord)
+
+
+  pols <- list()
+  for (i in 1:f) { # loop to generate tree polygons
+    R.j <- rlnorm(1, meanlog = 1, sdlog = 0.2)
+    # create points on circle polygon with radius R
+    xcircle <- coord[i, 1] + R.j * cos(seq(0, 2 * pi, length.out = 100))
+    ycircle <- coord[i, 2] + R.j * sin(seq(0, 2 * pi, length.out = 100))
+    # close circle exactly
+    xcircle[100] <- xcircle[1]
+    ycircle[100] <- ycircle[1]
+    # make Polyon from points
+    disp.distance <- Polygon(cbind(xcircle, ycircle), hole = FALSE)
+    disp.distance.Polygons <- Polygons(list(disp.distance), ID = c(i))
+    disp.distance.Polygons <- SpatialPolygons(list(disp.distance.Polygons))
+
+    pols[[i]] <- disp.distance.Polygons
+    pols[[i]] <- spChFIDs(pols[[i]], paste("a", i, row.names(pols[[i]]), sep = "."))
+  }
+
+  joined <- SpatialPolygons(lapply(
+    pols,
+    function(x) {
+      x@polygons[[1]]
+    }
+  )) # joins all tree in a single sp object
+  union <- aggregate(unionSpatialPolygons(joined,
+    ID = paste("a", seq(1, f))
+  )) # makes union of all trees
+  return(union)
+}
+```
+
+```{r, suppressWarnings=T,eval=T}
+# generate and plot area
+fore <- forest(100)
+plot(fore[[1]])
+# generate trees
+trees.for <- trees(100, 80)
+plot(trees.for, add = T)
+```
+
+```{r, suppressWarnings=T,eval=T}
+treecover <- function(union, square, gridsize) {
+  union.area <- data.frame(area = sapply(union@polygons,
+    FUN = function(x) {
+      slot(x, "area")
+    }
+  )) # make
+  intersect.area <- intersect(union, square) # calculate intersection area
+
+  intersect.area <- data.frame(area = sapply(intersect.area@polygons,
+    FUN = function(x) {
+      slot(x, "area")
+    }
+  ))
+  true.cover <- intersect.area / area(square)
+
+  return(true.cover)
+}
+```
+
+## calculate tree cover
+```{r , suppressWarnings=T,eval=T}
+treecover(trees.for, fore[[1]], 100)
+```
+
+## sample cover in quadrats
+The percent cover in the `n` quadrats is calculated based on the quadrat size and the trees in the area.
+```{r,suppressWarnings=T,eval=T}
+quadrats <- function(trees, quadsize, gridsize, n, overlapping = F) {
+  size <- rep(quadsize, n)
+  if (overlapping) {
+    # assign location of quadrates randomly
+    x <- runif(n, min = 0, max = 100 - size[1])
+    y <- runif(n, min = 0, max = 100 - size[1])
+  } else {
+    # quadrats are located on a grid, but chosen randomly
+    x <- seq(0, gridsize - quadsize, quadsize)
+    y <- seq(0, gridsize - quadsize, quadsize)
+    xy <- expand.grid(x, y)
+    xy <- xy[sample(c(1:nrow(xy)), n, replace = F), ]
+    x <- xy[, 1]
+    y <- xy[, 2]
+  }
+
+  # loop of quadrats to determine percent cover in each quadrat
+  fCover <- numeric(length = n)
+  for (k in 1:n) {
+
+    # make quadrat
+    square <- matrix(c(
+      x[k], y[k], x[k], (y[k] + size[k]),
+      (x[k] + size[k]), (y[k] + size[k]), (x[k] + size[k]), y[k], x[k], y[k]
+    ), ncol = 2, byrow = 2)
+    square.1 <- Polygon(square, hole = FALSE)
+    # make polygon of quadrat
+    square.polygons <- Polygons(list(square.1), ID = c("1"))
+    square.quadrat <- SpatialPolygons(list(square.polygons))
+    # calculate intersection of quadrat and trees
+    intersect.area <- intersect(trees, square.quadrat)
+    if (is.null(intersect.area)) {
+      fCover[k] <- 0
+    } else {
+      intersect.areas <- data.frame(area = sapply(intersect.area@polygons,
+        FUN = function(x) {
+          slot(x, "area")
+        }
+      ))
+      area.square.r <- data.frame(area = sapply(square.quadrat@polygons,
+        FUN = function(x) {
+          slot(x, "area")
+        }
+      ))
+      fCover[k] <- intersect.areas / area.square.r
+    }
+  }
+
+  fCover <- unlist(fCover)
+  if (length(fCover) != n) {
+    print(c("number of values not equal to number of quadrats", fCover[which(fCover > 1)]))
+  }
+  return(fCover)
+}
+```
+
+# set simulation characteristics
+```{r, suppressWarnings=T, warning=F,message=F,eval=T}
+n <- 15 # number of quadrats positioned in grid
+quadsize <- 10 # square meter
+gridsize <- 100 # length of grid (100m)
+reps <- 20 # number of forests
+MAP <- c(125, 2500)
+# we assume 0.4 tree per mm of rainfall/year
+MAP <- ceiling(seq(MAP[1], MAP[2], length.out = reps))
+# number of plants sown in grid
+nplants <- ceiling(seq(MAP[1], MAP[length(MAP)], length.out = reps)) * 0.4  
+```
+
+# create dataframe to store results in
+```{r, suppressWarnings=T , warning=F,message=F,eval=T}
+fCover <- as.data.frame(matrix(NA, nrow = reps, 5 + n - 1))
+```
+
+# simulate forests
+```{r,suppressWarnings=T, warning=F,message=F,eval=T, cache=TRUE}
+forests <- forest(gridsize)[[1]] # generate empty forest area
+
+count <- 0
+for (i in nplants) {
+  count <- count + 1
+  # generates union of trees
+  trees.f <- trees(gridsize, i) 
+  # calculates treecover over whole area
+  treecov <- treecover(trees.f, forests, gridsize) 
+  # calculate tree cover in n quadrats
+  quadcov <- quadrats(trees.f, quadsize, gridsize, n, overlapping = F) 
+  # store results
+  fCover[count, 1] <- i * 1 / 0.4 # to get MAP
+  fCover[count, 2] <- gridsize
+  fCover[count, 3] <- quadsize
+  fCover[count, 4] <- treecov
+  fCover[count, 5:(4 + n)] <- quadcov
+}
+```
+## Analysing results
+```{r, suppressWarnings=T,eval=T}
+fCover.m <- melt(fCover, id.var = 1:4)
+```
+
+## Fitting statistical model to percent cover
+```{r, suppressWarnings=T,eval=T}
+fCover.m$covert <- transform01(fCover.m[, 6])
+bet1 <- betareg(fCover.m$covert ~ fCover.m[, 1] | fCover.m[, 1], link = "cloglog")
+bet2 <- betareg(fCover.m$covert ~ fCover.m[, 1] | fCover.m[, 1], link = "logit")
+bet3 <- betareg(1 - fCover.m$covert ~ fCover.m[, 1] - 1 | fCover.m[, 1], link = "log")
+lm1 <- lm(logit(fCover.m$covert) ~ fCover.m[, 1])
+lm2 <- lm(log(1 - fCover.m$covert) + 0 ~ fCover.m[, 1])
+coef.bet1 <- coef(bet1)
+coef.bet2 <- coef(bet2)
+coef.bet3 <- coef(bet3)
+coef.lm <- coef(lm1)
+coef.lm2 <- coef(lm2)
+```
+
+## Plotting % cover as a function of number of individuals in the forest area.
+```{r, suppressWarnings=T,eval=T}
+
+plot(fCover.m[, "covert"] ~ fCover.m[, 1], xlab = "MAP (mm/year)", 
+     ylab = "percent cover", col = scales::alpha("grey", 0.7))
+points(fCover.m[, 4] ~ fCover.m[, 1], col = "blue", lwd = 2)
+curve(backtransform.est(cloglog(coef.bet1[1] + coef.bet1[2] * x, inverse = T), 
+                        nrow(fCover.m)),
+  col = "orange", lwd = 2, lty = 1, add = T
+)
+curve(backtransform.est(inv.logit(coef.bet2[1] + coef.bet2[2] * x), nrow(fCover.m)),
+  add = T,
+  col = "purple", lwd = 2
+)
+curve(backtransform.est(1 - exp(coef.bet3[1] * x), nrow(fCover.m)),
+  add = T,
+  col = "green", lwd = 2, lty = 1
+)
+curve(backtransform.est(inv.logit(coef.lm[1] + coef.lm[2] * x), nrow(fCover)),
+  add = T,
+  col = "red", lwd = 2
+)
+curve(backtransform.est(1 - exp(coef.lm2[1] + coef.lm2[2] * x), nrow(fCover)),
+  add = T,
+  col = "red", lwd = 2, lty = 2
+)
+legend("bottomright", c("true cover", "beta-cloglog", "beta-logit", "beta-log",
+                        "logit trans", "log trans"),
+  col = c("blue", "orange", "purple", "green", "red", "red"),
+  lty = c(NA, 1, 1, 1, 1, 2), pch = c(1, NA, NA, NA, NA, NA), lwd = 2
+)
+```
+## Calculating RMSE of different models
+```{r, suppressWarnings=T,eval=T}
+
+fCover.m$fit.beta <- fitted(bet1)
+fCover.m$fit.beta2 <- fitted(bet2)
+fCover.m$fit.beta3 <- 1 - fitted(bet3)
+fCover.m$logit1 <- inv.logit(fitted(lm1))
+fCover.m$log2 <- exp(fitted(lm2))
+
+
+rmse.beta.cloglog <- RMSE(fCover.m$V4, fCover.m$fit.beta)
+rmse.beta.logit <- RMSE(fCover.m$V4, fCover.m$fit.beta2)
+rmse.beta.log <- RMSE(fCover.m$V4, fCover.m$fit.beta3)
+rmse.logit <- RMSE(fCover.m$V4, fCover.m$logit1)
+rmse.log <- RMSE(fCover.m$V4, fCover.m$log2)
+
+# ratio of RMSE for best fitting beta model and transformation
+rmse.beta.log / rmse.logit
+```
+
+## Test if mismatch between model predictions and observations is indeed substantially smaller in case of beta regression by generating many forests.
+
+To explore the effect of the quadrat size on the average root mean squared error we varied the quadrat size in 9 steps from 4 to 20.
+
+```{r,eval=F}
+eff.quadrat.size <- function(quadsize, sims, n = 15, nplants, ndep = F, area.sam = 1600) {
+  if (area.sam > gridsize^2) {
+    print(c("you want to sample a larger area than the total forest area"))
+  }
+
+  if (ndep) {
+    n <- round(area.sam / (quadsize^2))
+  }
+  fCover <- as.data.frame(matrix(NA, nrow = length(nplants), 5 + n - 1))
+  print(quadsize)
+  # make data frame to store results in
+  out <- as.data.frame(matrix(NA, nrow = sims, ncol = 5))
+  for (j in 1:sims) {
+    forests <- forest(gridsize)[[1]] # generate empty forest area
+
+    count <- 0
+    for (i in nplants) {
+      count <- count + 1
+      # generates union of trees
+      trees.f <- trees(gridsize, i) 
+      # calculates treecover over whole area
+      treecov <- treecover(trees.f, forests, gridsize) 
+      # calculate tree cover in n quadrats
+      quadcov <- suppressWarnings(quadrats(trees.f, quadsize, 
+                                           gridsize, n = n, overlapping = F))
+      # store results
+      fCover[count, 1] <- i
+      fCover[count, 2] <- gridsize
+      fCover[count, 3] <- quadsize
+      fCover[count, 4] <- treecov
+
+      if (sum(quadcov > 1)) {
+        print(c("some quadrat covers larger than one, set to a maximum of one",
+                quadcov[which(quadcov > 1)]))
+        quadcov[quadcov > 1] <- 1
+      }
+      fCover[count, 5:(4 + n)] <- quadcov
+    }
+
+    if (sum(fCover, na.rm = T) == 0) {
+      print("only zeros or ones")
+      # store results
+      out[j, 1] <- NA
+      out[j, 2] <- NA
+      out[j, 3] <- NA
+      out[j, 4] <- NA
+      out[j, 5] <- NA
+      out1 <- data.frame(quadsize, j, out[j, ])
+    } else {
+
+
+      # melt data.frame
+      fCover.m <- melt(fCover, id.var = 1:4)
+
+      fCover.m$covert <- transform01(fCover.m[, 6])
+      bet1 <- suppressWarnings(betareg(fCover.m$covert ~ fCover.m[, 1] | fCover.m[, 1], 
+                                       link = "cloglog"))
+      bet2 <- suppressWarnings(betareg(fCover.m$covert ~ fCover.m[, 1] | fCover.m[, 1], 
+                                       link = "logit"))
+      bet3 <- suppressWarnings(betareg(1 - fCover.m$covert ~ fCover.m[, 1] - 1 | fCover.m[, 1],
+                                       link = "log"))
+      lm1 <- lm(logit(fCover.m$covert) ~ fCover.m[, 1])
+      lm2 <- lm(log(1 - fCover.m$covert) + 0 ~ fCover.m[, 1])
+      coef.bet1 <- coef(bet1)
+      coef.bet2 <- coef(bet2)
+      coef.bet3 <- coef(bet3)
+      coef.lm <- coef(lm1)
+      coef.lm2 <- coef(lm2)
+
+      # calculate fitted values
+      if (length(fitted(bet1)) == nrow(fCover.m)) {
+        fCover.m$fit.beta <- fitted(bet1)
+      } else {
+        (fCover.m$fit.beta <- NA)
+      }
+
+      if (length(fitted(bet2)) == nrow(fCover.m)) {
+        fCover.m$fit.beta2 <- fitted(bet2)
+      } else {
+        (fCover.m$fit.beta2 <- NA)
+      }
+
+      if (length(fitted(bet3)) == nrow(fCover.m)) {
+        fCover.m$fit.beta3 <- 1 - fitted(bet3)
+      } else {
+        (fCover.m$fit.beta3 <- NA)
+      }
+
+      fCover.m$logit1 <- inv.logit(fitted(lm1))
+      fCover.m$log2 <- exp(fitted(lm2))
+
+      # calculate RMSE. # root mean squared error of true cover and 
+      # modelled tree cover of a 1 ha plot.
+      rmse.beta.cloglog <- RMSE(fCover.m$V4, fCover.m$fit.beta)
+      rmse.beta.logit <- RMSE(fCover.m$V4, fCover.m$fit.beta2)
+      rmse.beta.log <- RMSE(fCover.m$V4, fCover.m$fit.beta3)
+      rmse.logit <- RMSE(fCover.m$V4, fCover.m$logit1)
+      rmse.log <- RMSE(fCover.m$V4, fCover.m$log2)
+    }
+    # store results
+    out[j, 1] <- rmse.beta.cloglog
+    out[j, 2] <- rmse.beta.logit
+    out[j, 3] <- rmse.beta.log
+    out[j, 4] <- rmse.logit
+    out[j, 5] <- rmse.log
+    out1 <- data.frame(quadsize, j, out[j, ])
+  }
+
+  ## mean bias
+  # average root mean squared error of true cover and modelled tree cover of a 1 ha plot.
+  mismatch <- apply(out, 2, mean)
+  names(mismatch) <- c("cloglog", "logit", "log", "logit-t", "log-t")
+  return(mismatch)
+}
+
+n <- 15 # number of quadrats positioned in grid
+quadsize <- 10 # square meter
+gridsize <- 100 # length of grid (100m)
+reps <- 20 # number of forests
+MAP <- c(125, 2500)
+# we assume 0.4 tree per mm of rainfall/year
+MAP <- ceiling(seq(MAP[1], MAP[2], length.out = reps))
+# number of plants sown in grid
+nplants <- ceiling(seq(MAP[1], MAP[length(MAP)], length.out = reps)) * 0.4 
+# specify quadrat sizes
+quads <- c(4, 6, 8, 10, 15, 20) # seq(2,50,length.out = 9)
+# calculation may take long when sims > 5
+rmse.quadsize <- sapply(quads, eff.quadrat.size, sims = 5, n = 15, nplants = nplants, ndep = T) 
+rmse.quadsize
+```
+
+
+![Root mean squaed error as a function of quadrat size for beta regression with various link functions (cloglog, log, logit) and the logit transformation (logit.t). The log transformation is not shown because the RMSE is approximately a factor ten higher compared to the other models. Number of quadrats is kept constant while varying qaudrat size. See main text for details. Error bars represent standard errors of the mean, n = 50](quadsize_rmse.pdf)
+
+
+![Root mean squaed error as a function of quadrat size for beta regression with various link functions  (cloglog, log, logit) and the logit transformation (logit.t). The log transformation is not shown because the RMSE is approximately a factor ten higher compared to the other models.Total  area sampled is kept constant while varying qaudrat size.  See main text for details. Error bars represent standard errors of the mean, n = 50](quadsize_areaconstant_rmse.pdf)
+

@@ -1,0 +1,896 @@
+---
+title: "Appendix S3 - Case study applying beta regression to percent cover data"
+author: "James Weedon & Bob Douma"
+output:
+  html_document:
+    css: hideOutput.css
+  pdf_document: default
+  word_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+<script src="hideOutput.js"></script>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The first case study illustrates the application of beta regression to the analysis of an ANOVA-type study design i.e. comparing responses across groups where the response variable is a proportion. 
+The data are taken from the study of Andrew and Underwood (1993, *Marine Ecology Progress Series*, **99:** 89-98) who experimentally manipulated the density of the sea urchin *Centrosthepanus rodgersii* to investigate the effects of its grazing on the colonisation of filamentous algae (see also Quinn & Keough 2002, p 209).
+Four different treatments were imposed: an undisturbed control, complete removal of the sea urchin, and two levels of partial removal of sea urchins such that 33% or 66% of the original sea urchin density remained.
+Treatments were replicated in four randomly located patches (3-4 m$^2$).
+Algae colonisation was measured by percent cover in five randomly located 0.25 m$^2$ quadrats located within the patches. There were therefore 5 measurements nested within 16 patches, equally divided among four different treatments.
+
+This case study is an illustration of proportions originating from measuring a continuous variable - percent algae cover - in a fixed and arbitrary space (fixed quadrat size; Table 1).
+Beta regression is an appropriate choice for modelling this type of response.
+Andrew & Underwood (1993) analysed this data (reanalysed by Quinn & Keough (2002)) using a nested ANOVA to account for the replicated observations within each patch.
+They concluded that treatments did not significantly affect the cover of filamentous algae.
+
+Our reanalysis of this dataset has the following steps: 
+
+- We begin by reproducing the nested ANOVA analysis presented in Quinn and Keough (2002) and proceed with the simplest possible beta regression analysis: ignoring the within patch variation by pooling the replicate quadrats within each patch. 
+
+- Next, we fit a variable $\phi$ model to allow for differences in dispersion between treatments
+
+
+- We then demonstrate the use of different bias correction procedures that can be applied in Beta regression and compare the consequences for inference in this case.
+
+- We show how the beta regression model can be used to incorporate random effects, allowing for the modeling of nested observations.
+
+- We analyze the data using zero-augmented beta regression models implemented in a Bayesian framework.
+
+- Lastly we provide code for estimating bias in model fits using a parametric bootstrap procedure.
+
+In the course of the case study we will need to perform beta regression using two different modeling functions and R packages; namely `betareg`and `glmmTMB` . In addition we will use `plyr` for some data pre-processing, `lmtest` for performing likelihood-ratio tests, `boot` for the inverse logit function, `emmeans` for pairwise comparisons, `brms` for zero-augmented models, `ggplot2` for graphing, and `mvtnorm` for simulations. At certain points we will also define some special functions to help make the R code more readable. We start by loading the required packages:
+
+
+```{r, message=FALSE}
+library(betareg)
+library(plyr)
+library(lmtest)
+library(glmmTMB)
+library(boot)
+library(emmeans)
+library(brms)
+library(ggplot2)
+library(mvtnorm)
+library(nlme)
+library(rstan)
+```
+
+## Data read-in and pre-processing
+
+The next step is to read in the data. At the time of writing this datafile was available at the website associated with Quinn & Keough's (2002) textbook (http://qkstats.com/data-files/)- we have also included a copy of the datafile in the `Source Files` directory of the supplementary material.
+
+Since quadrat and plot labels are coded as integers in the datafile, we explicitly specify them as factors in the call to `read.csv`:
+
+<div class="fold o">
+```{r, eval=T,collapse=T,message=FALSE  }
+andrew <- read.csv("data/andrew.csv", colClasses = c(QUAD = "factor", PATCH = "factor"))
+summary(andrew)
+```
+</div>
+
+We plot the raw data as a boxplot for each treatment.
+Note this includes nested observations within each patch.
+
+<div class="fold s">
+```{r}
+plot(ALGAE ~ TREAT, andrew)
+```
+</div>
+
+The data are given as percentage values (i.e. bounded at 0 and 100). In the following plot we divide by 100 to convert to the [0-1] proportion scale, we also split out the replicate patches within each treatment, so that the within-patch, quadrat level variation is visible.
+
+<div class="fold s">
+```{r}
+andrew$PATCHm <- as.factor(as.numeric(as.character(andrew$PATCH)) %% 5 + 1)
+ggplot() +
+  geom_point(aes(x = PATCHm, y = ALGAE / 100), data = andrew) +
+  facet_grid(. ~ TREAT, switch = "x") +
+  theme(
+    axis.text.x = element_text(size = 11),
+    axis.text.y = element_text(size = 11),
+    axis.title.y = element_text(size = 11),
+    axis.title.x = element_text(size = 11),
+    panel.background = element_rect(fill = "white", colour = NA),
+    panel.border = element_rect(fill = NA, colour = "grey50"),
+    panel.grid.major = element_line(colour = "grey90", size = 0.2),
+    panel.grid.minor = element_line(colour = "grey98", size = 0.5),
+    strip.background = element_rect(fill = "grey80", colour = "grey50"),
+    legend.text = element_text(size = 11),
+    strip.text.x = element_text(size = 11)
+  ) +
+  ylab("Proportion cover") +
+  xlab("Patch no. in Treatment")
+```
+</div>
+
+From both these plots it is clear that the data are bounded at zero, and also that the variance seems to be related to the treatment level.
+
+Both of these data characteristics violate the assumptions of normal linear models.
+
+## Classical Analysis
+Before demonstrating the use of beta regression with this data, we first provide code for reproducing the analysis of this dataset given in Quinn & Keough (2002).
+These authors decided to apply a ANOVA with treatment as the fixed effect and patch as a nested or random effect.
+They concluded that Treatment does not have a significant effect on algal cover (although they note that the very low variance in the Control treatment may lead to issues in interpreting the significance tests.)
+
+<div class="fold o">
+```{r, eval=T,collapse=T,message=FALSE  }
+
+aov.1 <- aov(ALGAE ~ TREAT + Error(PATCH), data = andrew)
+summary(aov.1)
+```
+</div>
+
+A very similar analysis can be conducted using the library `nlme` for mixed effects modeling.
+
+```{r}
+
+lme.1 <- lme(ALGAE ~ TREAT, random = ~ 1 | PATCH, data = andrew)
+anova(lme.1)
+```
+
+Although neither approach leads to a significant effect of `TREAT` (based on the 0.05 significance threshold, comparing this model to a null model does suggest a significant improvement in model fit when including information about treatment. However, given the large heterogeneity of variance between treatments, and the boundedness of the response variable - this conclusion is not very persuasive.
+
+```{r}
+
+lme.null <- lme(ALGAE ~ 1, random = ~ 1 | PATCH, data = andrew)
+
+lrtest(lme.1, lme.null)
+```
+
+
+
+## Beta regression with pooled observations
+
+
+We now turn to the beta regression model, that models the response variable as being generated from a beta distribution (i.e. that is bounded at 0 and 1).
+
+Given that the observations of percent cover are based on replicate quadrats nested within experimental patches, we simplify the initial analysis by averaging the observations within each patch. In a subsequent section we will re-analyze with a mixed effects approach to preserve the nested structure of the dataset, but for simplicity we start by analyzing observations at the level of experimental patch.
+
+
+```{r}
+andrew2 <- ddply(andrew, ~PATCH, summarise, ALGAE.mean = mean(ALGAE) / 100, treat = TREAT[1])
+plot(ALGAE.mean ~ as.numeric(treat), andrew2)
+```
+
+
+We begin by attempting to fit a beta regression model, with `ALGAE.mean` as the response, and `treat` as the categorical predictor.
+
+
+```{r error=TRUE}
+
+bm1 <- betareg(ALGAE.mean ~ treat, data = andrew2)
+```
+
+As is evident from the error message, `betareg` will not accept values of 0 and 1 in the response variable.
+
+There are two possible solutions here, rescaling the data to remove 0s and 1s, or fitting zero-inflated models. We start here with the rescaling solution. A suggested rescaling equation is:
+
+$$ x^*_{i} = \frac{x_i(n-1)+0.5}{n} $$
+
+Where $x^*_i$ is the transformation of $x_i$ and $n$ is the total number of observations in the dataset.
+
+For convenience we define this as a custom function `tranform01` and apply it to the dataset:
+
+```{r}
+
+transform01 <- function(x) {
+  (x * (length(x) - 1) + 0.5) / (length(x))
+}
+
+
+andrew2$ALGAE.scaled <- transform01(andrew2$ALGAE.mean)
+```
+
+
+With this scaled data we can now succesfully fit the model. And test its significance relative to a null model that assumes no effect of the grazer manipulation treatment. For reference we also fit a classical ANOVA model assuming normally distributed errors using `lm`.
+
+
+```{r}
+
+bm2 <- betareg(ALGAE.scaled ~ treat, data = andrew2)
+bmnull <- betareg(ALGAE.scaled ~ 1, data = andrew2)
+lm1 <- lm(ALGAE.scaled ~ treat, data= andrew2)
+
+summary(bm2)
+lrtest(bm2, bmnull)
+AIC(lm1, bm2, bmnull)
+
+```
+
+According to the likelihood-ratio test there is no significant difference betwen the null model and the treatment model. The AIC analysis supports this conclusion, but also highlights the improved model fit with beta regression relative to normal ANOVA (`lm1`). From this initial analysis we would tentatively conclude that using betaregresson improves our ability to model the algal cover, but that there is no effect of grazer manipulation treatment.
+
+
+It is useful to plot the predictions derived from the model and compare them to the observed data. First we define two new functions to allow us to use the `dbeta` and `rbeta` functions with the $\mu$ and $\phi$ parameterization.
+
+<div class="fold o">
+```{r}
+
+dbeta2 <- function(X, mu, phi, ...) {
+  dbeta(X, shape1 = mu * phi, shape2 = (1 - mu) * phi, ...)
+}
+
+rbeta2 <- function(N, mu, phi, ...) {
+  rbeta(N, shape1 = mu * phi, shape2 = (1 - mu) * phi, ...)
+}
+```
+</div>
+
+With this function we can plot the distributions corresponding to the MLE parameters for each treatment :
+
+<div class="fold s">
+```{r}
+
+# extract coefficients of beta regression model
+coefs.bm2 <- coef(bm2)
+
+# create vector spanning the transformed 0-1 interval
+
+n.bm2 <- length(fitted(bm2))
+x.range <- seq(0.5/n.bm2 , 1-0.5/n.bm2 , length.out = 200)
+x.range.bt <- (x.range*n.bm2 - 0.5)/(n.bm2-1)
+# control
+plot(x.range.bt, dbeta2(x.range, inv.logit(coefs.bm2["(Intercept)"]), coefs.bm2["(phi)"]),
+     type = "l", lty = 2, lwd = 2,
+     ylab = "Probability density", xlab = "Proportion cover",
+     ylim=c(0,10)
+)
+
+# rem
+lines(x.range.bt, dbeta2(x.range, inv.logit(coefs.bm2["(Intercept)"] + coefs.bm2[2]), coefs.bm2["(phi)"]),lwd = 2, col = "red")
+
+# t033
+lines(x.range.bt, dbeta2(x.range, inv.logit(coefs.bm2["(Intercept)"] + coefs.bm2[3]), coefs.bm2["(phi)"]), col = "blue", lwd = 2)
+
+# t066
+lines(x.range.bt, dbeta2(x.range, inv.logit(coefs.bm2["(Intercept)"] + coefs.bm2[4]), coefs.bm2["(phi)"]), lwd = 2, col = "green")
+
+rug(andrew2$ALGAE.mean[andrew2$treat=="con"], lwd=1.5,pos=10)
+rug(andrew2$ALGAE.mean[andrew2$treat=="t0.33"],col="blue", pos=9.75, side = 3,lwd=1.5)
+rug(andrew2$ALGAE.mean[andrew2$treat=="t0.66"], col="green", pos = 9.5, side = 3, lwd=1.5)
+rug(andrew2$ALGAE.mean[andrew2$treat=="rem"], pos=9.25, col="red", side = 3, lwd=1.5)
+
+legend("topright", lwd = 2, lty = c(2, 1, 1, 1), col = c("black", "blue", "green", "red"), legend = c("Control", "0.33", "0.66", "Removal"), bty = "n")
+```
+</div>
+
+We have added the original observations (patch-level means) as ticks of the appropriate colour, and back-transformed the densities to allow fair visual comparisons between the fitted distributions and the original data using:
+
+$$ x_{i} = \frac{x^*_in-0.5}{(n-1)} $$
+
+Note that the vertical positioning of the dots is merely to prevent overplotting.
+
+From this plot we can see that the model does a reasonable job of fitting beta distributions to each of the treatment levels, but that perhaps the variance of the control group is somewhat overestimated by the model. And that likewise, the variance of the other three groups appears to me somewhat underestimated. This can be confirmed with a residual plot, using residuals calculated relative to their predicted variance.
+
+```{r}
+
+plot(resid(bm2) ~ fitted(bm2))
+
+```
+
+The spread of the standardized residuals is strongly related to the fitted values, suggesting that variance is not being adequately modeled. This observation suggests the possible utility of allowing for the precision parameter $\phi$ to vary between treatment groups. The following section will show extension of the beta regression model to allow for this.
+
+
+### Variable precision $\phi$
+
+We can repeat the above analysis using a model that allows $\phi$ to vary with predictors. This is achieved by adding a second part to the right hand side of the formula, separated with the `|` symbol. All covariates to the right of this `|` symbol will be used to model $\phi$. Note that they do not have to be the same covariates used to model $\mu$ (specified to the left of the `|`).
+
+
+```{r}
+bm3 <- betareg(ALGAE.scaled ~ treat | treat, data = andrew2)
+
+summary(bm3)
+```
+
+From the `Coefficients` table we see that the estimate for $\mu$ in the Control treatment is `inv.logit(-3.0921)` = `0.043` = 4.3\% algal cover. Moreover, the estimates of $\mu$ for the other 3 treatments are each significantly higher.
+
+From the `Phi coefficients` table we can see that the maximum likelihood estimate of the precision is highest in the Control treatment and is reduced significantly relative to this baseline in each of other treatment groups. In other words, the model fit confirms our impression from the previous two graphs that a fixed $\phi$ model overestimates variance in the Control treatment, and underestimates it in the other three treatments.
+
+We can use likelihood-ratio tests to compare the new model to the fixed-$\phi$ and null models.
+
+```{r}
+lrtest(bm2, bm3)
+lrtest(bmnull, bm2, bm3)
+```
+
+
+The likelihood ratio tests indicate that the model with varying $\phi$  is significantly better than both the previous fixed $\phi$ model, and the null model. In this case the conclusion is that including the model for $\phi$ led to a better fitting model than both the fixed $\phi$ model and the null model.
+
+
+It is possible to apply post-hoc tests to identify which pariwise contrasts of treatments levels are significant.
+
+
+```{r}
+test(pairs(emmeans(bm3, ~treat, mode = "link")))
+```
+
+
+We conclude from this analysis that the control treatment is significantly different to the other three treatments, and that none of these are significantly different from each other. Note that more accurate modeling of the treatment effect on variance led to altered inferences about the effect of treatment on means. This is an important point: **correct modeling of $\phi$ can often be important for accurate inference on $\mu$.**
+
+Residual plots confirm our conclusion that `bm3` provides a better fit to the observed data than `bm2`. This is seen by the more even spread of residuals in the second plot below.
+
+
+<div class="fold s">
+```{r fig.height=10}
+par(mfrow = c(2, 1), oma = c(0, 0, 0, 0), mar = c(4, 4, 0.2, 0.2))
+plot(residuals(bm2) ~ fitted(bm2))
+plot(residuals(bm3) ~ fitted(bm3))
+```
+</div>
+
+As above we can plot the MLE distributions for each of the treatments, based on the variable $\phi$ model:
+
+
+
+<div class="fold s">
+```{r}
+
+# plot distributions
+muphi.bm3 <- unique(data.frame(
+  mu = fitted(bm3),
+  phi = predict(bm3, type = "precision"),
+  treatment = andrew2$treat
+))
+
+
+
+
+plot(x.range.bt , dbeta2(x.range, muphi.bm3[1, 1], muphi.bm3[1, 2]),
+     type="l",
+     xlab = "Proportion cover", ylab = "Probability density",
+     lty = 2, lwd = 2)
+
+for (i in 2:4) {
+  lines(x.range.bt, dbeta2(x.range, muphi.bm3[i, 1], muphi.bm3[i, 2]), col = c("black", "blue", "red", "green")[i], lty = 1, lwd = 2)
+}
+legend("topright", lwd = 2, lty = c(2, 1, 1, 1), col = c("black", "blue", "green", "red"), legend = c("Control", "0.33", "0.66", "Removal"), bty = "n")
+```
+</div>
+
+Due to the much narrower variance of the Control treatment group in this model, the probability density plots of the other treatments are rather distorted. The graph below rescales the Y axis for comparison to the fixed $\phi$ model above.
+
+<div class="fold s">
+```{r}
+
+
+
+plot(x.range.bt , dbeta2(x.range, muphi.bm3[1, "mu"], muphi.bm3[1, "phi"]),
+     type="l",
+     xlab = "Proportion cover", ylab = "Probability density",
+     lty = 2, lwd = 2, ylim=c(0,10))
+
+for (i in 2:4) {
+  lines(x.range.bt, dbeta2(x.range, muphi.bm3[i, "mu"], muphi.bm3[i, "phi"]), col = c("black", "blue", "red", "green")[i], lty = 1, lwd = 2)
+}
+  
+  
+legend("topright", lwd = 2, lty = c(2, 1, 1, 1), col = c("black", "blue", "green", "red"), legend = c("Control", "0.33", "0.66", "Removal"), bty = "n")
+
+
+rug(andrew2$ALGAE.mean[andrew2$treat=="con"], lwd=1.5,pos=10)
+rug(andrew2$ALGAE.mean[andrew2$treat=="t0.33"],col="blue", pos=9.75, side = 3,lwd=1.5)
+rug(andrew2$ALGAE.mean[andrew2$treat=="t0.66"], col="green", pos = 9.5, side = 3, lwd=1.5)
+rug(andrew2$ALGAE.mean[andrew2$treat=="rem"], pos=9.25, col="red", side = 3, lwd=1.5)
+```
+</div>
+
+
+These plots support the conclusion from the likelihood ratio tests above. The best-fit distributions from the variable $\phi$ model better match the observed differences in dispersion between the different groups.
+
+
+## Bias correction
+
+As discussed in the main article, a common issue is that the estimators of the beta regression model may be biased, particularly when the sample size is small (n = 16 here when using patch-level observations).
+
+Bias correction can be done in two ways in the `betareg` package, by specifying either 'bias correction' (`BC`) or 'bias reduction' (`BR`). See Gr&uuml;n _et al._ (2012) for further details.
+
+In the code below we refit `bm2`, `bm3` and `bmnull` (see above) using each of the bias adjustment options.
+
+<div class="fold o">
+```{r, eval=T,collapse=T,message=FALSE}
+
+bm2.bc <- betareg(ALGAE.scaled ~ treat, data = andrew2, type = "BC")
+bmnull.bc <- betareg(ALGAE.scaled ~ 1, data = andrew2, type = "BC")
+bm3.bc <- update(bm2, . ~ . | treat, type = "BC")
+
+bm2.br <- betareg(ALGAE.scaled ~ treat, data = andrew2, type = "BR")
+bmnull.br <- betareg(ALGAE.scaled ~ 1, data = andrew2, type = "BR")
+bm3.br <- update(bm2, . ~ . | treat, type = "BR")
+
+confint(bm3)
+confint(bm3.bc)
+confint(bm3.br)
+
+AIC(bmnull.br, bm2.br, bm3.br)
+AIC(bmnull.bc, bm2.bc, bm3.bc)
+AIC(bmnull, bm2, bm3)
+
+lrtest(bmnull.br, bm2.br, bm3.br)
+lrtest(bmnull.bc, bm2.bc, bm3.bc)
+lrtest(bmnull, bm2, bm3)
+```
+</div>
+
+From the 95% confidence intervals, we can see that the parameter estimates and their associated uncertainties are only slightly changed in this case.
+
+From the AIC comparison and the likelihood ratio test we can conclude that the model that allows for a different mean per treatment a non-constant precision $\phi$ among the treatments is preferred above models with either constant precision and variable treatment means, or a model with constant precision and constant treatment mean. The bias reduction does not change this conclusion.
+
+
+
+### Posterior prediction plots
+The plots of `bm2` and `bm3` above use the best fit parameters to generate the modeled distributions. However these distributions do not account for uncertainty in the maximum likelihood estimates. Using Monte Carlo simulations from the best-fit parameters and their associated variance-covariance matrix we can generate graphs that also allow for this uncertainty.
+
+First we define a convenience function `simulate_beta_fit` that takes a model fit, and uses the maximum likelihood estimates and associated variance-covariance matrix to generate `n` new sets of coefficients. The spread of these coefficients therefore reflect both the uncertainty in the parameter estimates, and the correlation between parameter estimates.
+
+These new parameters sets are then used to generate `NN` (default 1000) observations from a Beta distribution paramaterized for each unique set of predictors (in this case corresponding to the 4 treatment levels).
+
+Note that generating posterior predictions and associated distributions is much more straightforward when using MCMC-based model fitting procedures such as those in `rstan` or `brms` packages (see below).
+
+<div class="fold o">
+```{r}
+simulate_beta_fit <- function(model, n = 1000, NN = 1000) {
+  num.coefs.mean <- length(coef(model, model = "mean"))
+  num.coefs.phi <- length(coef(model, model = "precision"))
+
+  new.coefs <- rmvnorm(n = n, coef(model), sigma = vcov(model))
+
+  mm.mean <- model.matrix(model, model = "mean")
+  mm.prec <- model.matrix(model, model = "precision")
+
+  lin.predict.mu <- mm.mean %*% t(new.coefs[, 1:num.coefs.mean])
+  lin.predict.phi <- mm.prec %*% t(new.coefs[, (1 + num.coefs.mean):(num.coefs.mean + num.coefs.phi)])
+
+  pams <- list(mu = inv.logit(lin.predict.mu), precision = exp(lin.predict.phi))
+  upams <- list(mu = unique(pams[[1]]), phi = pams[[2]][row.names(unique(pams[[1]])), ])
+
+  sims <- matrix(NA, ncol = dim(upams$mu)[1], nrow = n * NN)
+  for (i in 1:ncol(sims)) {
+    sims[, i] <- rbeta2(
+      n = nrow(sims),
+      mu = rep(upams$mu[i, ], rep(NN, n)),
+      phi = rep(upams$phi[i, ], rep(NN, n))
+    )
+  }
+  return(sims)
+}
+```
+</div>
+
+Now that this function is defined we can use it to generate posterior predictive distributions based on the model `bm2` (lines) and compare them to the observed data (points).
+
+
+<div class="fold s">
+```{r}
+ppp.bm2 <- data.frame(simulate_beta_fit(bm2))
+
+names(ppp.bm2) <- levels(andrew2$treat)[c(1, 3, 2, 4)]
+
+plot(density(ppp.bm2$con, bw = 0.04, from = 0, to = 1), xlim = c(0, 1), main = "", xlab = "Proportion cover", ylab = "Probability density", lty = 2, ylim = c(0,10))
+lines(density(ppp.bm2$rem, bw = 0.04, from = 0, to = 1), col = "red")
+lines(density(ppp.bm2$t0.33, bw = 0.04, from = 0, to = 1), col = "blue")
+lines(density(ppp.bm2$t0.66, bw = 0.04, from = 0, to = 1), col = "green")
+
+rug(andrew2$ALGAE.mean[andrew2$treat=="con"], lwd=1.5,pos=10)
+rug(andrew2$ALGAE.mean[andrew2$treat=="t0.33"],col="blue", pos=9.75, side = 3,lwd=1.5)
+rug(andrew2$ALGAE.mean[andrew2$treat=="t0.66"], col="green", pos = 9.5, side = 3, lwd=1.5)
+rug(andrew2$ALGAE.mean[andrew2$treat=="rem"], pos=9.25, col="red", side = 3, lwd=1.5)
+
+legend("topright", lwd = 2, lty = c(2, 1, 1, 1), col = c("black", "blue", "green", "red"), legend = c("Control", "0.33", "0.66", "Removal"), bty = "n")
+```
+</div>
+
+And another based on `bm3`:
+
+<div class="fold s">
+```{r}
+ppp.bm3 <- data.frame(simulate_beta_fit(bm3))
+
+names(ppp.bm3) <- levels(andrew2$treat)[c(1, 3, 2, 4)]
+
+plot(density(ppp.bm3$con, bw = 0.04, from = 0, to = 1), xlim = c(0, 1), main = "", xlab = "Proportion cover", ylab = "Probability density", lty = 2, ylim = c(0,10))
+lines(density(ppp.bm3$rem, bw = 0.04, from = 0, to = 1), col = "red")
+lines(density(ppp.bm3$t0.33, bw = 0.04, from = 0, to = 1), col = "blue")
+lines(density(ppp.bm3$t0.66, bw = 0.04, from = 0, to = 1), col = "green")
+
+rug(andrew2$ALGAE.mean[andrew2$treat=="con"], lwd=1.5,pos=10)
+rug(andrew2$ALGAE.mean[andrew2$treat=="t0.33"],col="blue", pos=9.75, side = 3,lwd=1.5)
+rug(andrew2$ALGAE.mean[andrew2$treat=="t0.66"], col="green", pos = 9.5, side = 3, lwd=1.5)
+rug(andrew2$ALGAE.mean[andrew2$treat=="rem"], pos=9.25, col="red", side = 3, lwd=1.5)
+
+legend("topright", lwd = 2, lty = c(2, 1, 1, 1), col = c("black", "blue", "green", "red"), legend = c("Control", "0.33", "0.66", "Removal"), bty = "n")
+```
+</div>
+
+The comparison between the model with constant precision among treatments (`bm2`) and the one with varying precision (`bm3`) shows that the latter better matches the distribution of the observations. Again, this supports our earlier finding that a model with variable precision is better able to describe the differences between treatments.
+
+---
+
+### Incorporating nested structure with random effects
+
+The models above have pooled the observations in each patch. However we can also used mixed-effects models to allow for the nested structure of observations (`QUADRAT` within `PATCH`).
+
+
+First we rescale the data in the original (unpooled) data set.
+<div class="fold o">
+```{r}
+
+andrew$ALGAE.scaled <- transform01(andrew$ALGAE / 100)
+```
+</div>
+
+The `betareg` package does not currently allow fitting of mixed-effects beta regression models. Such models can be specified and fit using the `glmmTMB` package (https://github.com/glmmTMB
+). The syntax and output are broadly similar to the `glm` function in base R.
+
+First, to ensure we can use and interpret the new function correctly, we try to reproduce the model fit from above with the pooled data:
+
+<div class="fold o">
+```{r}
+glm.1 <- glmmTMB(ALGAE.scaled ~ treat, data = andrew2, family = list(family = "beta", link = "logit"))
+summary(glm.1)
+```
+</div>
+
+The parameter estimates and associated significance tests are the same as for `bm2` fitted above using the `betareg` package.
+
+
+Algae colonisation was measured by percent cover in five randomly located 0.25 m$^2$ quadrats located within the patches. To account for the fact that those quadrats were taken from within the same patch, a mixed effect model is appropriate. A mixed effect model allows us to account for a hierarchical structure in the data.
+
+The syntax for speciying a mixed effect model is similar to `betareg` except that the random effect needs to be specified, i.e. the grouping variable. This can be done by adding `(1|PATCH)`.
+
+<div class="fold o">
+```{r}
+# random effect
+glm.2 <- glmmTMB(ALGAE.scaled ~ TREAT + (1 | PATCH), data = andrew, family = list(family = "beta", link = "logit"))
+summary(glm.2)
+```
+</div>
+
+The output of the mixed effect model contains three important parts: the random effects estimates, the fixed effects estimates and the estimated dispersion. The first part shows that variance in proportion cover among patches is 0.42 units on the logit scale. The fixed parts shows the effect of treatments on  mean proportion cover. The dispersion ($\phi$) for the beta model is 3.77 and in this model specification is assumed to be the same for all treatments.
+
+To relax this last assumption we can incorporate a covariate model for the dispersion parameter, equivalent to model `bm3` above.
+
+<div class="fold o">
+```{r}
+glm.3 <- update(glm.2, dispformula = ~TREAT)
+summary(glm.3)
+
+bbmle::AICtab(glm.2, glm.3)
+```
+</div>
+
+By allowing a covariate model for the dispersion parameter, the summary output changes slightly. A summary table on the dispersion parameter ($\phi$) is added for the different treatments (including their standard error and significance). A comparison of both models by AIC shows that the model allowing for non-constant precision for the treatments is preferred (delta AIC > 2). This corroborates the outcome of the analyses on the pooled observations.
+
+
+We can compare the fitted distributions between the pooled and mixed-effects versions. First we define a convenience function to calculate the parameter estimates for each of the treatments (`coef_to_mean`):
+
+<div class="fold o">
+```{r}
+
+coef_to_mean <- function(model) {
+  vals <- fixef(model)$cond
+  out <- c(vals[1], vals[2:length(vals)] + vals[1])
+  return(out)
+}
+```
+</div>
+
+
+<div class="fold s">
+```{r fig.height = 10, fig.width=10}
+old <- par(mfrow = c(2, 2))
+
+muphi_glm1 <- data.frame(mu = inv.logit(coef_to_mean(glm.1)), precision = sigma(glm.1), treat = levels(andrew2$treat))
+
+curve(dbeta2(x, muphi_glm1[1, 1], muphi_glm1[1, 2]),
+  xlab = "proportion", ylab = "probability density",
+  main = "Pooled-data model, fixed phi"
+)
+abline(v = muphi_glm1[1, 1], lty = 2)
+
+for (i in 2:4) {
+  curve(dbeta2(x, muphi_glm1[i, 1], muphi_glm1[i, 2]), add = T, col = i)
+  abline(v = muphi_glm1[i, 1], col = i, lty = 2)
+}
+legend("topright", legend = levels(andrew2$treat), col = c(1, 2, 3, 4), lty = 1)
+
+muphi_glm2 <- data.frame(mu = inv.logit(coef_to_mean(glm.2)), precision = sigma(glm.2), treat = levels(andrew2$treat))
+
+
+curve(dbeta2(x, muphi_glm2[1, 1], muphi_glm2[1, 2]),
+  xlab = "proportion", ylab = "probability density",
+  main = "Hierarchical model, fixed phi"
+)
+abline(v = muphi_glm2[1, 1], lty = 2)
+
+for (i in 2:4) {
+  curve(dbeta2(x, muphi_glm2[i, 1], muphi_glm2[i, 2]), add = T, col = i)
+  abline(v = muphi_glm2[i, 1], col = i, lty = 2)
+}
+legend("topright", legend = levels(andrew2$treat), col = c(1, 2, 3, 4), lty = 1)
+
+muphi_glm3 <- data.frame(inv.logit(coef_to_mean(glm.3)), precision = sigma(glm.3), treat = levels(andrew2$treat))
+
+curve(dbeta2(x, muphi_glm3[1, 1], muphi_glm3[1, 2]),
+  xlab = "proportion", ylab = "probability density",
+  main = "Hierarchical model, variable phi"
+)
+abline(v = muphi_glm3[1, 1], lty = 2)
+for (i in 2:4) {
+  curve(dbeta2(x, muphi_glm3[i, 1], muphi_glm3[i, 2]), add = T, col = i)
+  abline(v = muphi_glm3[i, 1], col = i, lty = 2)
+}
+legend("topright", legend = unique(andrew2$treat), col = c(1, 2, 3, 4), lty = 1)
+
+par(old)
+```
+</div>
+
+Note that in the above plots, the vertical dashed lines indicate the best-fit mean for each group.
+
+### Posthoc test
+The analysis below shows that the control differs from the other treatments. This confirms the findings of earlier fitted  model in which we averaged over patches within treatments.
+<div class="fold o">
+```{r, eval=T,collapse=T,message=FALSE  }
+
+source("https://raw.githubusercontent.com/glmmTMB/glmmTMB/78fbf246e88ae7f23c1ffcc48136278eb982a60a/misc/lsmeans.R")
+lsmeans(glm.3, pairwise ~ TREAT) ## Tukey
+f.lsm <- lsmeans(glm.3, "TREAT")
+(f_contr.lsm <- contrast(f.lsm, "trt.vs.ctrl", ref = 1))
+```
+</div>
+
+The advantage of the mixed effect model compared to the pooled model, is that we get a cleaner partitioning of the variation in algae cover among patches and the precision parameters. In addition, in the mixed effect model we do inference on the observed algae cover values and not on the averaged algae cover values. In the pooled analysis, we observe smaller standard errors in the estimates of treatment effects on mean cover compared to the mixed effect model.
+
+
+## Using zero-augmented beta regression models to model algae cover.
+
+Up until now we have used transformations to remove observations of 0 and 1 from the response variable.
+
+However, as mentioned in the main article, it is possible to extend the beta regression model to also handle these kinds of observations.
+
+The package `brms` allows the possibility to specify and fit zero- or one-augmented beta regression models.
+We will now use this package  to analyse the original % cover data without applying the transformation used above to "contract" the observed values away from the boundary values of 0 and 1.
+
+First we make a new variable rescaling the original [0-100] observations to [0-1], but leaving them untransformed.
+
+
+```{r}
+
+andrew$pALGAE <- andrew$ALGAE / 100
+```
+
+We first use fit a model equivalent to the `glm.3` mixed effects above, that is, a model for both the mean and dispersion of algal cover is specified, in both cases as a function of removal treatment. In addition we specify that the observations of individual quadrats are nested within experimental patches.
+
+The syntax for specifying the model formula in the `brm` function is slightly more elaborate than what has been seen in previous examples. A full explanation is available at `?brm` and `?brmsformula`. The specification of the formula should be contained within a call to `brmsformula`. Separate formulas can be specified for the mean model, the phi model, and the zero-augmentation model. Grouping variables can be specified with the `+ (1|GROUP)` syntax.
+
+
+For the first model `brm.mm`, we do not yet specify a zero or one inflation, so the output is expected to be similar to the random effects beta regression with varying $\phi$ fit above (`glm.3`). We still need to use the transformed response data `ALGAE.scaled`.
+
+
+```{r second_slow_chunk, cache=TRUE, results="hide", warning=FALSE, message=FALSE}
+# beta regression model without zero inflation
+brm.mm <- brm(brmsformula(ALGAE.scaled ~ TREAT + (1|PATCH), phi ~ TREAT, family = Beta()), data=andrew, iter=5000)
+```
+
+Note that the distributions of the parameters of the model are estimated using Markov Chain Monte Carlo (MCMC) algorithms. This step therefore takes several minutes to complete.
+Note also that the estimate of the coefficients are based on samples from the MCMC chains, and the reliability of interpretations of these estimates depends on the degree to which the MCMC chains have converged on the target density. Convergence criteria for MCMC chains is a very large and technical topic, but here we limit our analysis to a visual inspection the traces of the chains. They should appear stationary (no clear trend) and well mixed (no difference between the two independent chains). We here show the MCMC traces for the first 4 parameters as an illustration.
+
+```{r fig.height=8}
+
+traceplot(brm.mm$fit, pars=c("b_Intercept", "b_phi_Intercept", "b_TREATrem", "b_TREATt0.33"))
+```
+
+As a first  check of the results of this new modeling procedure, we compare the posterior means for each coefficient with the MLE estimates obtained in `glm.3`
+
+```{r}
+# need to change order of parameters to line up with glmmTMB output
+sample.1 <- summary(brm.mm)$fixed[c(1,3,4,5,2,6,7,8),"Estimate"]
+
+plot(sample.1 ~ I(1:8),
+  ylim = c(-6, 4), pch = 16, cex = 1.5,
+  ylab = "Parameter estimate",
+  xlab = "Parameter No."
+)
+
+points(summary(glm.3)$coefficients$cond[, 1] ~ I((1:4) + 0.1), pch = 16, col = "red", cex = 1.5)
+points(summary(glm.3)$coefficients$disp[, 1] ~ I((5:8) + 0.1), pch = 16, col = "red", cex = 1.5)
+legend("topright", legend = c("brm.mm", "glm.3"), pch = 16, pt.cex = 1.5, col = 1:2, bty = "n")
+```
+
+From the above graph we conclude that the parameter estimates between the two methods are very similar. Although this is merely an informal comparison, it gives us some confidence in our use of the function. We now proceed to incorporate zero-inflation into the model specification.
+
+As described in the main article, we are now modeling the observations as coming from a two-step process: each observation is first modeled as being generated by a binomial process (determining the probability of a zero observation) and then all non-zero observations are modeled as a Beta process.
+
+This specification is achieved by adding a third component to the  model formula. The code: `zi ~ TREAT` fits a model for which the mean response of the beta process, the associated precision parameter, and the probability of a zero observation are each modeled as a function of treatment (`TREAT`). The argument `family=zero_inflated_beta()` is necessary to signify that a zero-inflation model is desired. Note that for this model we use the raw, untransformed data `pALGAE` that contains observations of zero.
+
+
+```{r third_slow_chunk, cache=TRUE, results="hide", message=FALSE,warning=FALSE}
+# code with zero inflation
+brm.zoib <- brm(brmsformula(pALGAE ~ TREAT + (1|PATCH), phi ~ TREAT, zi ~ TREAT, family=zero_inflated_beta()), data=andrew, iter=5000)
+```
+
+Because the two models use different response variables (that for `brm.mm` is transformed) we cannot directly compare the models using standard model selection criteria such as AIC or likelihood ratio tests.
+
+For visual comparison we produce a variation of the posterior prediction plots used above. This time with boxplots for each patch and red points showing the observed data.
+
+In the code below we aggregate the posterior fitted values predictions per patch, plot them as boxplots, and then overlay the corresponding observations. This is repeated for both `brm.mm` (random effects only) and `brm.zoib` (random effects plus zero-augmentation model).
+
+```{r fig.height=10}
+## compare the treatment distns between brm.mm and brm.zoib
+# first zoib.1
+andrew$PATCHnum <- as.numeric(as.character(andrew$PATCH))
+pred.brm.mm <- fitted(brm.mm, summary=FALSE, subset = 1:1000)
+
+ch1 <- lapply(unique(andrew$PATCH),
+  FUN = function(x) as.numeric(pred.brm.mm[,andrew$PATCH == x])
+)
+
+
+par(mfrow = c(2, 1))
+boxplot(ch1, border = "gray", ylim = c(0, 1), main = "Random effects")
+points(pALGAE ~ jitter(PATCHnum, factor = 0.4),
+  data = andrew,
+  pch = 16, col = "red"
+)
+
+abline(v = c(4.5, 8.5, 12.5), lty = 2, col = "blue")
+
+# now zoib.0
+pred.brm.zoib <- fitted(brm.zoib, summary=FALSE, subset = 1:1000)
+
+ch1.0 <- lapply(unique(andrew$PATCH),
+   FUN = function(x) as.numeric(pred.brm.zoib[,andrew$PATCH == x])
+)
+
+
+
+boxplot(ch1.0, border = "gray", ylim = c(0, 1), main = "Zero-augmented random effects")
+points(pALGAE ~ jitter(PATCHnum, factor = 0.4),
+  data = andrew,
+  pch = 16, col = "red"
+)
+abline(v = c(4.5, 8.5, 12.5), lty = 2, col = "blue")
+```
+
+Comparing the two plots reveals that the two model specifications give broadly similar predictions (grey boxplots). The main difference is in the Control treatment (left-most patches in both plots) - for a random effects model fit on transformed data, the model predicts very low, non-zero algal cover with low diversity. Altering the model to allow a zero-generating process that is separated from the process determining algal cover (lower plot) leads to a somewhat broader range of predicted values in these quadrats.
+
+The comparison in the model fits can be further visualized by extracting the coefficients and their associated quantiles from the `brms` model objects.
+
+```{r, warnings=FALSE}
+# extract coefficients
+summ <- summary(brm.mm)$fixed[c(1,3,4,5,2,6,7,8),c("Estimate", "l-95% CI", "u-95% CI")]
+
+summ0 <- summary(brm.zoib)$fixed[c(1,4,5,6,2,7,8,9,3,10,11,12),c("Estimate", "l-95% CI", "u-95% CI")]
+
+rownames(summ)[1] <- rownames(summ0)[1] <- "TREAT_Intercept"
+
+old <- par(mar = c(3,8,4,2))
+plot(summ0[,1], (1:12)-0.15, xlim=c(-7,7), pch=16, yaxt="n", ylab="", mar=c(3,6,2,2))
+segments(x0 = summ0[,2], x1 = summ0[,3], y0 = (1:12)-0.15)
+
+points(summ[,1], (1:8)+0.15, col="red")
+segments(x0 = summ[,2], x1 = summ[,3], y0 = (1:8)+0.15, col="red")
+axis(side = 2, at = 1:12,
+     labels = rownames(summ0), las = 1)
+
+abline(v = 0, lty=2)
+legend("topright", pch=16, col=c("black", "red"), lty=1,legend = c("Zero augmented","Mixed-effects only"))    
+
+par(old)
+```
+
+The parameters and their credible intervals are then plotted alongside each other.
+
+
+The plot shows that by adding a model zero-augmentation, the estimates for mu in the control treatment have shrunk (i.e. have become less negative). This make sense because the zeros are now accounted for by the zero inflation term. The beta model now only has to fit the non-zero observations.
+
+Since the parameter `TREAT_Intercept`, corresponding to the estimate of the mean in the Control treatment, has slightly increased, the  offsets for each of the other treatments (`TREATrem`, `TREAtt0.33`, `TREATt0.66`) have accordingly slightly decreased.
+
+As expected from inspecting the data, the probability of a zero is modeled to be highest in the control treatment `zi_Intercept` and is considerably reduced for the other three treatments.
+
+
+Despite these small differences between the models, we conclude that the zero-inflation model does not change our conclusions about the effect of grazer removal on algal cover: only the control treatment differed from all other treatments, and the other treatments did not differ from each other. In this particular case, it could be argued that it was not worthwhile to fit and run a more complicated zero-inflated model, relative to the techniques used above. But this cannot be a general conclusion, and there will certainly be cases where there is value in fiting models that specify a separate zero (or one) generating process, in addition to the beta process producing the non-zero (or one) values.
+
+
+## Advanced: Bias estimation using the parametric bootstrap
+
+In the section "_Bias correction_" above we showed how to use two different methods for bias adjustment that are implemented in the `betareg` package. Here we present a more general technique for quantifying and reducing bias in beta regression model. This may be useful for e.g. model specifications that are not available within the `betareg` package.
+
+Here we apply a parametric bootstrap procedure to estimate the bias associated with parameter estimation for the previously fit model `bm3`. This is the variable $\phi$ model applied to the transformed data pooled at the level of patch. More information about the parametric bootstrap for bias estimation is available in Kosmidis (2014. Bias in parametric estimation: reduction and useful side-effects. **_Wiley Interdisciplinary Reviews: Computational Statistics_** 6:185-196.)
+
+The procedure works as follows: we use the fitted model to simulate new data and fit a beta regression model to the newly simulated data and store the coefficients. We then repeat this process a large number of times (typically 1000 or more) producing a bootstrap distribution for each of the model coefficients. The average of the differences between each of these bootstrap coefficients and the corresponding coefficient in the original model fit (`bm3`) is an estimate of bias. In other words systematic deviation between the "true" values, and their associated bootstrap distributions is evidence of bias in parameter estimation for this particular model-data combination.
+
+The following code is rather involved. We are not aware of any packages that have implemented generalized functions for this kind of procedure. We have included comments to try and guide the reader through the code.
+
+
+<div class="fold o">
+```{r slow_analysis1, eval=T,collapse=T,message=FALSE, cache=TRUE  }
+
+# extract means and variance-covariance matrix from model object
+means <- unlist(coef(bm3))
+vc <- vcov(bm3)
+
+# sample from distribution of parameters assuming multivariate normal (accounts for correlation of parameters)
+
+N <- 1000 # global parameter for number of replications
+rnd <- rmvnorm(N, mean = means, sigma = vc) # returns an N x p matrix of coefficients
+
+dm <- model.matrix(bm3)
+
+# make predictions at the scale of the linear predictor
+per <- rnd[, 1:4] %*% t(dm)
+precision_lp <- rnd[, 5:8] %*% t(dm)
+
+# transform to mu and precision by using the appropriate inverse link functions
+mu <- inv.logit(per)
+prec <- exp(precision_lp)
+
+
+
+## simulate from each new set of predictors and calculate ratios
+# initialize output matrix
+output <- array(NA, dim = c(N, 10))
+
+# clone the original dataset
+newdata <- andrew2
+
+for (i in 1:N) {
+  # prediction
+  newdata$ALGAE.scaled <- rbeta2(16, mu[i, ], prec[i, ])
+  # fit model
+  bet1 <- try(betareg(formula = ALGAE.scaled ~ treat | treat, data = newdata))
+  # store output
+  output[i, 1:8] <- coef(bet1)
+  output[i, 9] <- logLik(bet1)
+  output[i, 10] <- AIC(bet1)
+}
+
+# remove failed optimisations, with AIC >0
+output <- output[output[, 10] < 0, ]
+
+# compute bootstrap mean for each parameter
+boots_mean <- apply(output, 2, mean)
+
+
+# compare to original parameters, negative numbers suggest underestimation
+# in the original model fit
+
+(bias <- boots_mean[1:8] - coef(bm3))
+```
+
+The estimates of the bias in the original fit of `bm3`, based on parametric bootstrapping, thus range between `r round(min(bias),3)` and `r round(max(bias),3)`. The most biased parameter was for the estimate of $\phi$ in the control group (`r round(100*bias[5]/coef(bm3)[5],0)`% of original estimate). The remaining estimates of bias were less than `r sort(round(100*bias/coef(bm3),0))[7]`% of the original estimate.
+
+These bias estimates can be subtracted from the original coefficients to give rough "bias corrected estimates":
+
+```{r}
+# the bias corrected estimates
+(coefs_unbiased <- coef(bm3) - bias)
+```
+</div>
+
+We can plot the distributions of the bias-corrected parameters over the original fit:
+
+```{r}
+curve(dbeta2(x, muphi.bm3[1, 1], muphi.bm3[1, 2]), xlab = "Proportion cover", ylab = "Probability density", lty = 1, lwd = 2, n = 400, ylim = c(0, 12))
+
+for (i in 2:4) {
+  curve(dbeta(x, muphi.bm3[i, 1], muphi.bm3[i, 2]), add = T, col = c("blue", "red", "green")[i - 1], lty = 1, lwd = 2)
+}
+legend("topright", lwd = 2, lty = c(1, 1, 1, 1), col = c("black", "blue", "green", "red"), legend = c("Control", "0.33", "0.66", "Removal"), bty = "n")
+
+
+muphi.bc <- unique(data.frame(mu = t(inv.logit(coefs_unbiased[1:4] %*% t(dm))), precision = t(exp(coefs_unbiased[5:8] %*% t(dm))), treat = andrew2$treat))
+
+
+
+for (i in 1:4) {
+  curve(dbeta2(x, muphi.bc[i, 1], muphi.bc[i, 2]), add = T, col = c("black", "blue", "red", "green")[i], lty = 2, lwd = 2)
+}
+```
+
+In the plot above the solid lines are the predicted distributions from the original `bm3` model, the dasehed lines represent the predictions after bias correction with the parametric bootstrap method.
+
+We conclude that the bias of the estimated parameters is rather small and does not seem to alter the main conclusions of the above analyses. In other cases, particularly with smaller data sets it is entirely possible that estimation bias has a larger relative effect which could affect the inferences made from the model.
