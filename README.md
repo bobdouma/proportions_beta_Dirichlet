@@ -2,7 +2,7 @@
 published in *Methods in Ecology and Evolution*
 by **J.C. Douma & J.T. Weedon**
 
-The files in this repository are the source files of the analysis presented in the paper and the supplementary materials. For the \*.rmd files the CC-BY-SA licence holds.
+The files in this repository are the source files of the analyses presented in the paper and the supplementary materials. For the \*.rmd files the CC-BY-SA licence holds.
 
 <a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/"><img alt="Creative Commons License" style="border-width:0" src="https://i.creativecommons.org/l/by-sa/4.0/80x15.png" /></a><br />This work is licensed under a <a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/">Creative Commons Attribution-ShareAlike 4.0 International License</a>.
 
