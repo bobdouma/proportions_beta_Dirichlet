@@ -1,11 +1,15 @@
 # Source files belonging to the paper: Analyzing continuous proportions in ecology and evolution: a practical introduction to beta and Dirichlet
-J.C. Douma & J.T. Weedon
-Methods in Ecology and Evolution
+**J.C. Douma & J.T. Weedon**
+published in *Methods in Ecology and Evolution*
 
-The files in this repository are the source files of the supplementary material belonging to the above mentioned paper. In addition, two datasets are provided that were used in case study 1 and case study 2.  
+The files in this repository are the source files of the supplementary material belonging to the above mentioned paper. For the \*.rmd files the CC-BY-SA licence holds.
+
+<a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/"><img alt="Creative Commons License" style="border-width:0" src="https://i.creativecommons.org/l/by-sa/4.0/80x15.png" /></a><br />This work is licensed under a <a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/">Creative Commons Attribution-ShareAlike 4.0 International License</a>.In addition, two datasets are provided that were used in case study 1 and case study 2.  
 
 Case study 1: Algae cover
-This data was collected by Andrew and Underwood and the analysis was published in Andrew, N. & Underwood, A. (1993) Density-dependent foraging in the sea urchin centrostephanus rodgersii on shallow subtidal reefs in new south wales, australia. Marine Ecology Press Series, 99, 89-98 and reanalysed by Quinn, G. & Keough, M. (2002) Experimental Design and Data Analysis for Biologists. Cambridge University Press, Cambridge. The data was retrieved from the website accompanying the book: https://qkstats.com/. We refer users to this website for issues on copyright.
+This data was collected by Andrew and Underwood and the analysis was published in:
+- Andrew, N. & Underwood, A. (1993) Density-dependent foraging in the sea urchin centrostephanus rodgersii on shallow subtidal reefs in new south wales, australia. Marine Ecology Press Series, 99, 89-98 and reanalysed by:
+- Quinn, G. & Keough, M. (2002) Experimental Design and Data Analysis for Biologists. Cambridge University Press, Cambridge. The data was retrieved from the website accompanying the book: https://qkstats.com/. We refer users to this website for issues on copyright.
 
 Case study 2: Proportion biomass allocated to stems, leaves and roots.
 This data was collected by Hendrik Poorter and co-workers and analyses were published in:
