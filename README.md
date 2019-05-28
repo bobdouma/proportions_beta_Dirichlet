@@ -18,7 +18,8 @@ Case study 2: Proportion biomass allocated to stems, leaves and roots (R6data.cs
 
 This data was collected by Hendrik Poorter and co-workers and analyses were published in:
 - Poorter, H., van de Vijver, C.A.D.M., Boot, R.G.A. & Lambers, H. (1995) Growth and carbon economy of a fast-growing and a slow-growing grass species as dependent on nitrate supply. Plant and Soil, 171, 217-227
-- Poorter, H., Niklas, K.J., Reich, P.B., Oleksyn, J., Poot, P. & Mommer, L. (2012) Biomass allocation to leaves, stems and roots: meta-analyses of interspecific variation and environmental control. New Phytologist, 193, 30-50. 
+- Poorter, H. & Sack, L. (2012) Pitfalls and possibilities in the analysis of biomass allocation patterns in plants. Frontiers in Plant Science, 3, 259.
+
 Please refer to the latter reference when using this data.
 
 In case of questions or comments, please contact Bob Douma (bob.douma@wur.nl) or James Weedon (james.weedon@vu.nl).
